@@ -7,6 +7,15 @@ import hashlib
 import heapq
 import time
 import random
+from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest
+
+
+class LogEntry:
+    """Class representing a log entry."""
+    def __init__(self, term, command):
+        self.term = term
+        self.command = command
+
 
 # Predefined ports and IP addresses for the servers
 DEFAULT_SERVERS = [
@@ -27,6 +36,109 @@ class Server:
         self.socket.bind(self.my_address) # bind to UDP socket
         self.running = True  # flag to control running state of listener thread
 
+        # RAFT variables
+        self.current_term = 0
+        self.voted_for = None
+        self.log = []  # Transaction log
+        self.commit_index = 0
+        self.role = "follower"  # Initial state is follower
+        self.election_timeout = random.uniform(3, 6)  # Randomized timeout for leader election: [T, 2T]
+        self.last_heartbeat = time.time()  # Track leader's last heartbeat
+
+
+        def start_election(self):
+            # Start a new election
+            self.role = "candidate"
+            self.current_term += 1
+            self.voted_for = self.my_address
+            votes_received = 1  # Vote for self
+
+            # Request votes from other servers
+            message = RequestVote(term=self.current_term, candidate_id=self.my_address, last_log_index=len(self.log)-1, last_log_term=self.log[-1].term if self.log else None).to_dict()
+            self.broadcast_message(message)
+
+            # Wait for votes
+            start_time = time.time()
+            while time.time() - start_time < self.election_timeout:
+                try:
+                    data, addr = self.socket.recvfrom(4096)
+                    response = json.loads(data.decode('utf-8'))
+                    if response.get("msg_type") == "VOTE_RESPONSE" and response.get("term") == self.current_term:
+                        votes_received += 1
+                    if votes_received > len(self.server_addresses) // 2: # Majority
+                        self.role = "leader"
+                        print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+                        self.send_heartbeats()
+                        break
+                except socket.timeout:
+                    break
+            
+            # if no outcome, restart election
+            if self.role == "candidate":
+                time.sleep(self.election_timeout)
+                self.start_election()
+                
+    def send_heartbeats(self):
+        """Send periodic heartbeats to maintain authority."""
+        while self.role == "leader":
+            message = AppendEntries(term=self.current_term, leader_id=self.my_address, prev_log_index=len(self.log)-1, prev_log_term=self.log[-1].term if self.log else None, entries=[], leader_commit=self.commit_index).to_dict()
+            self.broadcast_message(message)
+            time.sleep(1) # heartbeat interval
+
+    def handle_append_entries(self, message, addr):
+        """Handle incoming AppendEntries RPC: heartbeats & log replication."""
+        term = message.get("term")
+        leader_id = message.get("leader_id")
+        prev_log_index = message.get("prev_log_index")
+        prev_log_term = message.get("prev_log_term")
+
+        if term >= self.current_term:
+            # Step down if term is higher
+            self.role = "follower"
+            self.current_term = term
+            self.voted_for = None # Reset vote
+            self.last_heartbeat = time.time() # Reset election timeout
+            if self.log[prev_log_index].term != prev_log_term:
+                print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
+                return
+            # Append new entries  FIXME: NEED TO DELETE CONFLICTING ENTRIES
+            for entry in message.get("entries", []):
+                append_entry = LogEntry(term=entry["term"], command=entry["command"])
+                self.log.append(append_entry)
+            self.commit_index = message.get("leader_commit", 0)
+            # FIXME: ADVANCE STATE MACHINE WITH NEWLY COMMITTED ENTRIES
+            print(f"Received heartbeat from leader {leader_id} for term {term}, resetting election timeout.")
+        else:
+            print(f"Received outdated RPC from leader {leader_id} for term (term {term} < {self.current_term}), ignoring.")
+
+                
+    def handle_vote_request(self, message, addr):
+        """Handle incoming RequestVote RPC."""
+        term = message.get("term")
+        candidate_id = message.get("candidate_id")
+        last_log_index = message.get("last_log_index")
+        last_log_term = message.get("last_log_term")
+
+        if self.voted_for is None:
+            if term > self.current_term: # > or >=??
+                # Step down if term is higher
+                self.role = "follower"
+                self.current_term = term
+                self.voted_for = candidate_id
+                response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
+                self.sent_message(response, addr)
+                print(f"Voted for {candidate_id} in term {term}")
+            elif term == self.current_term and last_log_index < len(self.log) - 1:
+                # Vote for candidate if log is up-to-date
+                self.voted_for = candidate_id
+                response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
+                self.sent_message(response, addr)
+                print(f"Voted for {candidate_id} in term {term}")
+            else:
+                print(f"Rejecting vote request from {candidate_id} (less complete log)")
+        else:
+            print(f"Already voted for {self.voted_for} in term {self.current_term}, ignoring vote request from {candidate_id} in term {term}")
+
     def listen(self):
         # Listen for incoming UDP messages
         print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
@@ -37,13 +149,19 @@ class Server:
                 data, addr = self.socket.recvfrom(2048) # receive message
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
-                print(f"Received {message_data} from {SERVER_NAMES[addr]}")
+                msg_type = message_data.get("msg_type")
+                if msg_type == "APPEND_ENTRIES":
+                    self.handle_append_entries(message_data, addr)
+                elif msg_type == "REQUEST_VOTE":
+                    self.handle_vote_request(message_data, addr)
+
+                print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
 
             except socket.timeout:
-                # don't need to increment clock on message loss or drop since using udp on local host
-                continue  # ignore timeouts and keep checking for messages
+                # If no leader heartbeat is received, start an election
+                if self.role == "follower" and time.time() - self.last_heartbeat > self.election_timeout:
+                    self.start_election()
             except Exception as e:
-                # don't need to increment clock on message loss or drop since using udp on local host
                 print(f"Error receiving data: {e}")
                 break
     

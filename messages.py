@@ -34,3 +34,10 @@ class RequestVote(Message):
         self.candidate_id = candidate_id
         self.last_log_index = last_log_index
         self.last_log_term = last_log_term
+
+class VoteResponse(Message):
+    """Response to a RequestVote RPC."""
+    def __init__(self, term, vote_granted):
+        super().__init__("VOTE_RESPONSE")
+        self.term = term
+        self.vote_granted = vote_granted

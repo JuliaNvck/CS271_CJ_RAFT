@@ -20,8 +20,10 @@ def read_input_file(file_path):
     return transactions
 
 def send_transaction(x, y, amt):
-    """Sends a transaction request to a random server using UDP."""
-    server = random.choice(SERVERS)
+    """Sends a transaction request to a designated server using UDP."""
+    # Assume leader is the first server in the list
+    server = SERVERS[0]
+    # server = random.choice(SERVERS)
     message = ClientRequest(sender=x, receiver=y, amount=amt)
     serialized_message = json.dumps(message.to_dict()).encode('utf-8')
 

@@ -79,7 +79,7 @@ class Server:
                 self.start_election()
                 
     def send_heartbeats(self):
-        """Send periodic heartbeats to maintain authority."""
+        """Send periodic heartbeats (empty AppendEntries RPC) to maintain authority."""
         while self.role == "leader":
             message = AppendEntries(term=self.current_term, leader_id=self.my_address, prev_log_index=len(self.log)-1, prev_log_term=self.log[-1].term if self.log else None, entries=[], leader_commit=self.commit_index).to_dict()
             self.broadcast_message(message)
@@ -119,25 +119,19 @@ class Server:
         last_log_index = message.get("last_log_index")
         last_log_term = message.get("last_log_term")
 
-        if self.voted_for is None:
-            if term > self.current_term: # > or >=??
-                # Step down if term is higher
-                self.role = "follower"
-                self.current_term = term
-                self.voted_for = candidate_id
-                response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
-                self.sent_message(response, addr)
-                print(f"Voted for {candidate_id} in term {term}")
-            elif term == self.current_term and last_log_index < len(self.log) - 1:
-                # Vote for candidate if log is up-to-date
+        if term > self.current_term or (term == self.current_term and last_log_index >= len(self.log) - 1):
+            # Step down if term is higher or log is more complete
+            self.role = "follower"
+            self.current_term = term
+            if self.voted_for is None:
                 self.voted_for = candidate_id
                 response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
                 self.sent_message(response, addr)
                 print(f"Voted for {candidate_id} in term {term}")
             else:
-                print(f"Rejecting vote request from {candidate_id} (less complete log)")
+                print(f"Already voted for {self.voted_for} in term {self.current_term}, ignoring vote request from {candidate_id} in term {term}")
         else:
-            print(f"Already voted for {self.voted_for} in term {self.current_term}, ignoring vote request from {candidate_id} in term {term}")
+            print(f"Rejecting vote request from {candidate_id} (less complete log)")
 
     def listen(self):
         # Listen for incoming UDP messages

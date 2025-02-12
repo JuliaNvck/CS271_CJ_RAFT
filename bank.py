@@ -15,15 +15,14 @@ DEFAULT_SERVERS = [
     ("127.0.0.1", 5002),   # Server 3
 ]
 
-# Mapping of addresses to peer identifiers (peer 1, 2, 3)
-SERVER_NAMES = {peer: f"Peer {i+1}" for i, peer in enumerate(DEFAULT_SERVERS)}
+# Mapping of addresses to server identifiers (server 1, 2, 3)
+SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVERS)}
 
 # Server class (part of a cluster)
 class Server:
-    def __init__(self, my_ip, my_port, cluster_id, peer_addresses):
+    def __init__(self, my_ip, my_port, server_addresses):
         self.my_address = (my_ip, my_port) # initialize server with address
-        self.peer_addresses = peer_addresses # list of other peer's addresses
-        self.cluster_id = cluster_id
+        self.server_addresses = server_addresses # list of other peer's addresses
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # udp socket
         self.socket.bind(self.my_address) # bind to UDP socket
         self.running = True  # flag to control running state of listener thread
@@ -56,7 +55,7 @@ class Server:
         for server in self.server_addresses:
             try:
                 self.socket.sendto(serialized_message, server)  # send the message via UDP
-                print(f"Broadcasted message to {SERVER_NAMES[server]}: {message['type']}")
+                print(f"Broadcasted message to {SERVER_NAMES[server]}")
             except Exception as e:
                 print(f"Error broadcasting to {server}: {e}")
     
@@ -64,11 +63,12 @@ class Server:
         # Send message to specific server
         # serialize message
         serialized_message = json.dumps(message).encode('utf-8') 
+        receiver_addr = DEFAULT_SERVERS[receiver - 1]
         try:
-            self.socket.sendto(serialized_message, receiver)  # send the message via UDP
-            print(f"Sent message to {SERVER_NAMES[receiver]}: {message['type']}")
+            self.socket.sendto(serialized_message, receiver_addr)  # send the message via UDP
+            print(f"Sent message to {SERVER_NAMES[receiver_addr]}: {message}")
         except Exception as e:
-            print(f"Error broadcasting to {receiver}: {e}")
+            print(f"Error sending message to {SERVER_NAMES[receiver_addr]}: {e}")
 
     def get_user_input(self):
         while self.running:
@@ -89,7 +89,6 @@ class Server:
                 if receiver.isdigit() and 1 <= int(receiver) <= 3:
                     receiver = int(receiver)
                     self.send_message(message, receiver)
-                    break  # exit loop after sending block
                 else:
                     print("Invalid receiver. Please enter 1, 2, or 3.")
             else:
@@ -114,15 +113,95 @@ def main():
     my_ip = "127.0.0.1"
     my_port = int(sys.argv[1])
 
-    # Exclude this peer's address from the list of peers
+    # Exclude this server's address from the list of servers
     server_addresses = [addr for addr in DEFAULT_SERVERS if addr != (my_ip, my_port)]
 
-    # Define a cluster ID (you can customize this as needed)
-    cluster_id = 1  # Example cluster ID
-
-    # Create and run peer instance
-    server = Server(my_ip, my_port, cluster_id, server_addresses)
+    # Create and run server instance
+    server = Server(my_ip, my_port, server_addresses)
     server.run()
 
 if __name__ == "__main__":
     main()
+
+
+# import socket
+# import threading
+# import sys
+
+# # Predefined ports and IP addresses for the servers
+# DEFAULT_SERVERS = [
+#     ("127.0.0.1", 5000),  # server 1
+#     ("127.0.0.1", 5001),  # server 2
+#     ("127.0.0.1", 5002)   # server 3
+# ]
+# # Create a mapping of addresses to server identifiers
+# SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVERS)}
+# class Server:
+#     def __init__(self, my_ip, my_port, server_addresses):
+#         self.my_address = (my_ip, my_port)
+#         self.server_addresses = server_addresses
+#         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+#         self.socket.bind(self.my_address)
+#         self.running = True  # Flag to control the listener thread
+#     def listen(self):
+#         """Listen for incoming messages."""
+#         print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
+#         while self.running:
+#             try:
+#                 self.socket.settimeout(1)  # Set a timeout to periodically check the running flag
+#                 data, addr = self.socket.recvfrom(1024)
+#                 if addr in SERVER_NAMES:
+#                     print(f"Received from {SERVER_NAMES[addr]}: {data.decode()}")
+#                 else:
+#                     print(f"Received from unknown server {addr}: {data.decode()}")
+#             except socket.timeout:
+#                 continue  # Ignore timeouts and keep checking for messages
+#             except Exception as e:
+#                 print(f"Error receiving data: {e}")
+#                 break
+    
+#     def send_message(self, message, receiver):
+#         # serialize message
+#         serialized_message = json.dumps(message).encode('utf-8') 
+#         try:
+#             self.socket.sendto(serialized_message, receiver)  # Send the message via UDP
+#             print(f"Sent message to {receiver}: {message}")
+#         except Exception as e:
+#             print(f"Error broadcasting to {receiver}: {e}")
+
+    
+#     def broadcast_message(self, message):
+#         """Send a message to all other servers."""
+#         for server in self.server_addresses:
+#             try:
+#                 self.socket.sendto(message.encode(), server)
+#                 print(f"Sent to {SERVER_NAMES[server]}: {message}")
+#             except Exception as e:
+#                 print(f"Error sending to {SERVER_NAMES[server]}: {e}")
+#     def run(self):
+#         # Start the listening thread
+#         threading.Thread(target=self.listen, daemon=True).start()
+#         # Allow the user to send messages
+#         while self.running:
+#             message = input("Enter message to send (type 'exit' to quit): ")
+#             if message.lower() == "exit":
+#                 print("Exiting...")
+#                 self.running = False  # Stop the listener thread
+#                 break
+#             self.broadcast_message(message)
+#         self.socket.close()
+#         print("Socket closed. Goodbye!")
+# def main():
+#     if len(sys.argv) < 2:
+#         print("Usage: python3 bank.py <my_port>")
+#         print("Example: python3 bank.py 5000")
+#         sys.exit(1)
+#     my_ip = "127.0.0.1"
+#     my_port = int(sys.argv[1])
+#     # Exclude this server's address from the list of servers
+#     server_addresses = [addr for addr in DEFAULT_SERVERS if addr != (my_ip, my_port)]
+#     # Create and run the server
+#     server = Server(my_ip, my_port, server_addresses)
+#     server.run()
+# if __name__ == "__main__":
+#     main()

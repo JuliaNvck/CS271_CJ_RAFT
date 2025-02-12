@@ -117,8 +117,11 @@ def main():
     # Exclude this peer's address from the list of peers
     server_addresses = [addr for addr in DEFAULT_SERVERS if addr != (my_ip, my_port)]
 
+    # Define a cluster ID (you can customize this as needed)
+    cluster_id = 1  # Example cluster ID
+
     # Create and run peer instance
-    server = Server(my_ip, my_port, server_addresses)
+    server = Server(my_ip, my_port, cluster_id, server_addresses)
     server.run()
 
 if __name__ == "__main__":

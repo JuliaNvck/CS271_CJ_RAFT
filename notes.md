@@ -1,6 +1,6 @@
 STEPS
-1. define servers
-2. udp communication
+1. define servers - done
+2. udp communication - done
 3. RAFT
 4. define clusters, add more clients to clusters
 5. 2PC

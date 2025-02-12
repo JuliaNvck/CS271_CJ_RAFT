@@ -46,37 +46,55 @@ class Server:
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
 
 
-        def start_election(self):
-            # Start a new election
-            self.role = "candidate"
-            self.current_term += 1
-            self.voted_for = self.my_address
-            votes_received = 1  # Vote for self
+    def start_election(self):
+        # Start a new election
+        self.role = "candidate"
+        self.current_term += 1
+        self.voted_for = self.my_address
+        votes_received = 1  # Vote for self
 
-            # Request votes from other servers
-            message = RequestVote(term=self.current_term, candidate_id=self.my_address, last_log_index=len(self.log)-1, last_log_term=self.log[-1].term if self.log else None).to_dict()
-            self.broadcast_message(message)
+        # Request votes from other servers
+        message = RequestVote(
+            term=self.current_term, 
+            candidate_id=self.my_address, 
+            last_log_index=len(self.log)-1, 
+            last_log_term=self.log[-1].term if self.log else None
+            ).to_dict()
+        self.broadcast_message(message)
 
-            # Wait for votes
-            start_time = time.time()
-            while time.time() - start_time < self.election_timeout:
-                try:
-                    data, addr = self.socket.recvfrom(4096)
-                    response = json.loads(data.decode('utf-8'))
-                    if response.get("msg_type") == "VOTE_RESPONSE" and response.get("term") == self.current_term:
-                        votes_received += 1
-                    if votes_received > len(self.server_addresses) // 2: # Majority
-                        self.role = "leader"
-                        print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
-                        self.send_heartbeats()
-                        break
-                except socket.timeout:
-                    break
-            
-            # if no outcome, restart election
-            if self.role == "candidate":
-                time.sleep(self.election_timeout)
-                self.start_election()
+        # Wait for votes
+        start_time = time.time()
+        while time.time() - start_time < self.election_timeout:
+            try:
+                data, addr = self.socket.recvfrom(4096)
+                response = json.loads(data.decode('utf-8'))
+
+                # Step down if a higher term message is received
+                if response.get("term", 0) > self.current_term:
+                    print(f"Received higher term {response.get('term')}, stepping down to follower.")
+                    self.role = "follower"
+                    self.current_term = response.get("term")
+                    self.voted_for = None
+                    return  # Stop election process
+                
+                # Count votes
+                if response.get("msg_type") == "VOTE_RESPONSE" and response.get("term") == self.current_term:
+                    votes_received += 1
+                
+                # Become leader if majority votes received
+                if votes_received > len(self.server_addresses) // 2: # Majority
+                    self.role = "leader"
+                    print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+                    self.send_heartbeats()
+                    return  # Exit election loop
+                
+            except socket.timeout:
+                break
+        
+        # if no outcome, restart election
+        if self.role == "candidate":
+            time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
+            self.start_election()
                 
     def send_heartbeats(self):
         """Send periodic heartbeats (empty AppendEntries RPC) to maintain authority."""
@@ -119,19 +137,30 @@ class Server:
         last_log_index = message.get("last_log_index")
         last_log_term = message.get("last_log_term")
 
-        if term > self.current_term or (term == self.current_term and last_log_index >= len(self.log) - 1):
-            # Step down if term is higher or log is more complete
-            self.role = "follower"
+        # Step down if term is higher
+        if term > self.current_term:
             self.current_term = term
-            if self.voted_for is None:
-                self.voted_for = candidate_id
-                response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
-                self.sent_message(response, addr)
-                print(f"Voted for {candidate_id} in term {term}")
-            else:
-                print(f"Already voted for {self.voted_for} in term {self.current_term}, ignoring vote request from {candidate_id} in term {term}")
-        else:
-            print(f"Rejecting vote request from {candidate_id} (less complete log)")
+            self.role = "follower"
+            self.voted_for = None  # Reset vote
+        
+        # Reject vote if already voted in this term
+        if self.voted_for is not None and self.voted_for != candidate_id:
+            print(f"Already voted for {self.voted_for} in term {self.current_term}, rejecting {candidate_id}")
+            return
+        
+        # Reject if candidate's log is less complete
+        my_last_log_index = len(self.log) - 1
+        my_last_log_term = self.log[-1].term if self.log else 0
+        if (last_log_term < my_last_log_term) or (last_log_term == my_last_log_term and last_log_index < my_last_log_index):
+            print(f"Rejecting vote request from {candidate_id} (outdated log).")
+            return
+
+        # Grant vote
+        if self.voted_for is None:
+            self.voted_for = candidate_id
+            response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
+            self.send_message(response, addr)
+            print(f"Voted for {candidate_id} in term {term}")
 
     def listen(self):
         # Listen for incoming UDP messages

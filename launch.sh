@@ -16,4 +16,4 @@ for port in "${ports[@]:1}"; do
               -e "tell application \"Terminal\" to do script \"cd '$current_dir' && python3 bank.py $port\" in front window"
 done
 
-echo "Servers launched successfully in separate tabs."
+echo "Servers launched successfully."

@@ -35,12 +35,15 @@ SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVE
 
 # Server class (part of a cluster)
 class Server:
-    def __init__(self, my_ip, my_port, server_addresses):
+    def __init__(self, my_ip, my_port, server_addresses, cluster_id):
         self.my_address = (my_ip, my_port) # initialize server with address
         self.server_addresses = server_addresses # list of other peer's addresses
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # udp socket
         self.socket.bind(self.my_address) # bind to UDP socket
         self.running = True  # flag to control running state of listener thread
+        self.cluster_id = cluster_id
+        self.shard_start = (cluster_id - 1) * 1000 + 1
+        self.shard_end = cluster_id * 1000
 
         # RAFT variables
         self.current_term = 0
@@ -56,9 +59,9 @@ class Server:
         self.client_addr = None  # Track client address
 
         # Initialize data store for transactions
-        self.data_store = {}  # Maps account names to balances (e.g., {"A": 100, "B": 200})
+        self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
         # Tracks which accounts are locked
-        self.locks = {}  # { "A": False, "B": False }
+        self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
 
 
     def start_election(self):
@@ -163,6 +166,7 @@ class Server:
        # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match   
         if prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term:
             print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
+            # FIXME: unlock accounts???
             response = AppendAck(success=False).to_dict()
             self.send_message(response, leader_id)
             return
@@ -267,15 +271,15 @@ class Server:
         self.replicate_log()
 
     def send_append_entries(self, addr):
-        """Leader sends AppendEntries RPC to a follower starting from nextIndex[addr]."""
-        if addr not in self.nextIndex:
-            self.nextIndex[addr] = len(self.log)  # Initialize nextIndex for new leader
+        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
+        if addr not in self.next_index:
+            self.next_index[addr] = len(self.log)  # Initialize next_index for new leader
 
-        prev_log_index = self.nextIndex[addr] - 1
+        prev_log_index = self.next_index[addr] - 1
         prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
 
-        # Send all missing log entries starting from nextIndex
-        entries = [{"term": entry.term, "command": entry.command} for entry in self.log[self.nextIndex[addr]:]]
+        # Send all missing log entries starting from next_index
+        entries = [{"term": entry.term, "command": entry.command} for entry in self.log[self.next_index[addr]:]]
         message = AppendEntries(
             term=self.current_term,
             leader_id=self.my_address,
@@ -301,7 +305,7 @@ class Server:
                 return
 
     def replicate_log(self):
-        """Leader sends AppendEntries RPC to a follower starting from nextIndex[addr]."""
+        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
         for server in self.server_addresses:
             self.send_append_entries(server)
 
@@ -327,8 +331,8 @@ class Server:
                             self.send_heartbeats()
                             return
                     else:
-                        print(f"Log inconsistency detected with {addr}, decrementing nextIndex and retrying...")
-                        self.nextIndex[addr] = max(0, self.nextIndex[addr] - 1)  # Move nextIndex back and retry
+                        print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
+                        self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
                         self.replicate_log(addr)
                         return
 

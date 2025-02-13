@@ -47,3 +47,12 @@ class AppendAck(Message):
     def __init__(self, success):
         super().__init__("APPEND_ACK")
         self.success = success
+
+class ClientResponse(Message):
+    """Response to a client request."""
+    def __init__(self, success, sender, receiver, amount):
+        super().__init__("CLIENT_RESPONSE")
+        self.success = success
+        self.sender = sender
+        self.receiver = receiver
+        self.amount = amount

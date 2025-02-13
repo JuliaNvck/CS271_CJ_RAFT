@@ -7,7 +7,7 @@ import hashlib
 import heapq
 import time
 import random
-from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest, AppendAck
+from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest, AppendAck, ClientResponse
 
 
 class LogEntry:
@@ -53,6 +53,12 @@ class Server:
         self.role = "follower"  # Initial state is follower
         self.election_timeout = random.uniform(3, 6)  # Randomized timeout for leader election: [T, 2T]
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
+        self.client_addr = None  # Track client address
+
+        # Initialize data store for transactions
+        self.data_store = {}  # Maps account names to balances (e.g., {"A": 100, "B": 200})
+        # Tracks which accounts are locked
+        self.locks = {}  # { "A": False, "B": False }
 
 
     def start_election(self):
@@ -167,6 +173,15 @@ class Server:
 
         # Append any new entries not in log
         for entry in entries:
+            sender = entry["transaction"]["sender"]
+            receiver = entry["transaction"]["receiver"]
+
+            # Lock accounts on followers
+            self.locks.setdefault(sender, False)
+            self.locks.setdefault(receiver, False)
+            self.locks[sender] = True
+            self.locks[receiver] = True
+
             self.log.append(LogEntry(term=entry["term"], transaction=entry["transaction"]))
 
         # Update commit index
@@ -215,10 +230,36 @@ class Server:
         print(f"Voted for {candidate_id} in term {term}")
 
     def handle_client_request(self, message, addr):
-        """Handles incoming client request by adding a new log entry and replicating it to followers."""
-        transaction = Transaction(sender=message.get("sender"), receiver=message.get("receiver"), amount=message.get("amount"))
-        new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
+        """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
+        sender = message.get("sender")
+        receiver = message.get("receiver")
+        amount = message.get("amount")
+        self.client_addr = addr  # Track client address
+
+        # Check if sender has sufficient balance
+        if self.data_store[sender] < amount:
+            print(f"Transaction rejected: {sender} has insufficient balance.")
+            return
         
+         # Set a timeout limit (e.g., 5 seconds)
+        timeout = 5  # seconds
+        start_time = time.time()
+        # Wait until both accounts are unlocked
+        while self.locks[sender] or self.locks[receiver]:
+            if time.time() - start_time > timeout:
+                print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
+                return  # Abort the transaction
+            
+            print(f"Waiting: {sender} or {receiver} is locked.")
+            time.sleep(0.1)  # Short delay
+        
+        # Conditions met: lock both sender and receiver
+        self.locks[sender] = True
+        self.locks[receiver] = True
+
+        # Create log entry and execute RAFT to replicate
+        transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
+        new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
         self.log.append(new_log_entry)  # Append to leader log
         print(f"Leader {self.my_address} appended new log entry: {transaction}")
 
@@ -300,9 +341,28 @@ class Server:
 
         # Apply commands from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
-            print(f"Executing command: {self.log[i].command}")
+            transaction = self.log[i].transaction # Get transaction from log
+            sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
+
+            # Update balances in data store
+            self.data_store.setdefault(sender, 0)
+            self.data_store.setdefault(receiver, 0)
+            self.data_store[sender] -= amount
+            self.data_store[receiver] += amount
+            print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+
+            # Leader notifies client
+            if self.role == "leader":
+                response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
+                self.send_message(response, self.client_addr)
+            
+        # Unlock sender and receiver
+        self.locks[sender] = False
+        self.locks[receiver] = False
 
         self.last_applied = self.commit_index  # Update last applied index
+
+        print(f"{self.my_address} Account Balances: {self.data_store}")
 
 
     def listen(self):
@@ -408,86 +468,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# import socket
-# import threading
-# import sys
-
-# # Predefined ports and IP addresses for the servers
-# DEFAULT_SERVERS = [
-#     ("127.0.0.1", 5000),  # server 1
-#     ("127.0.0.1", 5001),  # server 2
-#     ("127.0.0.1", 5002)   # server 3
-# ]
-# # Create a mapping of addresses to server identifiers
-# SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVERS)}
-# class Server:
-#     def __init__(self, my_ip, my_port, server_addresses):
-#         self.my_address = (my_ip, my_port)
-#         self.server_addresses = server_addresses
-#         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-#         self.socket.bind(self.my_address)
-#         self.running = True  # Flag to control the listener thread
-#     def listen(self):
-#         """Listen for incoming messages."""
-#         print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
-#         while self.running:
-#             try:
-#                 self.socket.settimeout(1)  # Set a timeout to periodically check the running flag
-#                 data, addr = self.socket.recvfrom(1024)
-#                 if addr in SERVER_NAMES:
-#                     print(f"Received from {SERVER_NAMES[addr]}: {data.decode()}")
-#                 else:
-#                     print(f"Received from unknown server {addr}: {data.decode()}")
-#             except socket.timeout:
-#                 continue  # Ignore timeouts and keep checking for messages
-#             except Exception as e:
-#                 print(f"Error receiving data: {e}")
-#                 break
-    
-#     def send_message(self, message, receiver):
-#         # serialize message
-#         serialized_message = json.dumps(message).encode('utf-8') 
-#         try:
-#             self.socket.sendto(serialized_message, receiver)  # Send the message via UDP
-#             print(f"Sent message to {receiver}: {message}")
-#         except Exception as e:
-#             print(f"Error broadcasting to {receiver}: {e}")
-
-    
-#     def broadcast_message(self, message):
-#         """Send a message to all other servers."""
-#         for server in self.server_addresses:
-#             try:
-#                 self.socket.sendto(message.encode(), server)
-#                 print(f"Sent to {SERVER_NAMES[server]}: {message}")
-#             except Exception as e:
-#                 print(f"Error sending to {SERVER_NAMES[server]}: {e}")
-#     def run(self):
-#         # Start the listening thread
-#         threading.Thread(target=self.listen, daemon=True).start()
-#         # Allow the user to send messages
-#         while self.running:
-#             message = input("Enter message to send (type 'exit' to quit): ")
-#             if message.lower() == "exit":
-#                 print("Exiting...")
-#                 self.running = False  # Stop the listener thread
-#                 break
-#             self.broadcast_message(message)
-#         self.socket.close()
-#         print("Socket closed. Goodbye!")
-# def main():
-#     if len(sys.argv) < 2:
-#         print("Usage: python3 bank.py <my_port>")
-#         print("Example: python3 bank.py 5000")
-#         sys.exit(1)
-#     my_ip = "127.0.0.1"
-#     my_port = int(sys.argv[1])
-#     # Exclude this server's address from the list of servers
-#     server_addresses = [addr for addr in DEFAULT_SERVERS if addr != (my_ip, my_port)]
-#     # Create and run the server
-#     server = Server(my_ip, my_port, server_addresses)
-#     server.run()
-# if __name__ == "__main__":
-#     main()

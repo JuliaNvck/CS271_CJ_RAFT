@@ -7,15 +7,21 @@ import hashlib
 import heapq
 import time
 import random
-from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest
+from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest, AppendAck
 
 
 class LogEntry:
     """Class representing a log entry."""
-    def __init__(self, term, command):
+    def __init__(self, term, transaction):
         self.term = term
-        self.command = command
+        self.transaction = transaction
 
+class Transaction:
+    """Class representing a transaction."""
+    def __init__(self, sender, receiver, amount):
+        self.sender = sender
+        self.receiver = receiver
+        self.amount = amount
 
 # Predefined ports and IP addresses for the servers
 DEFAULT_SERVERS = [
@@ -41,6 +47,9 @@ class Server:
         self.voted_for = None
         self.log = []  # Transaction log
         self.commit_index = 0
+        self.last_applied = 0
+        self.next_index = {} # Index of the next log entry to send to each follower
+        self.match_index = {} # Index of the highest log entry known to be replicated on a server
         self.role = "follower"  # Initial state is follower
         self.election_timeout = random.uniform(3, 6)  # Randomized timeout for leader election: [T, 2T]
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
@@ -77,6 +86,15 @@ class Server:
                     self.voted_for = None
                     return  # Stop election process
                 
+                # AppendEntries RPC received from new leader: step down
+                if response.get("msg_type") == "APPEND_ENTRIES" and response.get("term", 0) >= self.current_term:
+                    print(f"Received AppendEntries RPC from {response.get('leader_id')}, stepping down to follower.")
+                    self.role = "follower"
+                    self.current_term = response.get("term")
+                    self.voted_for = None
+                    self.last_heartbeat = time.time()  # Reset election timeout
+                    return  # Stop election process
+                
                 # Count votes
                 if response.get("msg_type") == "VOTE_RESPONSE" and response.get("term") == self.current_term:
                     votes_received += 1
@@ -85,6 +103,9 @@ class Server:
                 if votes_received > len(self.server_addresses) // 2: # Majority
                     self.role = "leader"
                     print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+                    # update next_index for all followers
+                    for server in self.server_addresses:
+                        self.next_index[server] = len(self.log)
                     self.send_heartbeats()
                     return  # Exit election loop
                 
@@ -99,7 +120,15 @@ class Server:
     def send_heartbeats(self):
         """Send periodic heartbeats (empty AppendEntries RPC) to maintain authority."""
         while self.role == "leader":
-            message = AppendEntries(term=self.current_term, leader_id=self.my_address, prev_log_index=len(self.log)-1, prev_log_term=self.log[-1].term if self.log else None, entries=[], leader_commit=self.commit_index).to_dict()
+            message = AppendEntries(
+                term=self.current_term, 
+                leader_id=self.my_address, 
+                prev_log_index=len(self.log)-1, 
+                prev_log_term=self.log[-1].term if self.log else None, 
+                entries=[], 
+                leader_commit=self.commit_index
+                ).to_dict()
+            
             self.broadcast_message(message)
             time.sleep(1) # heartbeat interval
 
@@ -109,25 +138,49 @@ class Server:
         leader_id = message.get("leader_id")
         prev_log_index = message.get("prev_log_index")
         prev_log_term = message.get("prev_log_term")
+        entries = message.get("entries", [])
+        leader_commit = message.get("leader_commit", 0)
 
-        if term >= self.current_term:
-            # Step down if term is higher
+        # Reject if term < current term
+        if term < self.current_term:
+            print(f"Received outdated RPC from leader {leader_id} for term (term {term} < {self.current_term}), ignoring.")
+            return
+
+        # Step down if term is higher
+        if term > self.current_term:
             self.role = "follower"
             self.current_term = term
             self.voted_for = None # Reset vote
-            self.last_heartbeat = time.time() # Reset election timeout
-            if self.log[prev_log_index].term != prev_log_term:
-                print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
-                return
-            # Append new entries  FIXME: NEED TO DELETE CONFLICTING ENTRIES
-            for entry in message.get("entries", []):
-                append_entry = LogEntry(term=entry["term"], command=entry["command"])
-                self.log.append(append_entry)
-            self.commit_index = message.get("leader_commit", 0)
-            # FIXME: ADVANCE STATE MACHINE WITH NEWLY COMMITTED ENTRIES
-            print(f"Received heartbeat from leader {leader_id} for term {term}, resetting election timeout.")
-        else:
-            print(f"Received outdated RPC from leader {leader_id} for term (term {term} < {self.current_term}), ignoring.")
+        
+        self.last_heartbeat = time.time() # Reset election timeout
+
+       # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match   
+        if prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term:
+            print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
+            response = AppendAck(success=False).to_dict()
+            self.send_message(response, leader_id)
+            return
+        
+        # If existing entries conflict with new entries, delete all existing entries starting with first conflicting entry
+        if prev_log_index + 1 < len(self.log): # there are conflicting entries
+            self.log = self.log[:prev_log_index + 1] # delete conflicting entries
+
+        # Append any new entries not in log
+        for entry in entries:
+            self.log.append(LogEntry(term=entry["term"], transaction=entry["transaction"]))
+
+        # Update commit index
+        if message.get("leader_commit", 0) > self.commit_index:
+            self.commit_index = min(message.get("leader_commit", 0), len(self.log) - 1)
+
+        # Advance state machine with newly committed entries
+        self.apply_committed_entries()
+
+        # Send ACK to leader
+        response = AppendAck(success=True).to_dict()
+        self.send_message(response, leader_id)
+
+        print(f"Follower {self.my_address} updated log, commit index: {self.commit_index}")
 
                 
     def handle_vote_request(self, message, addr):
@@ -144,7 +197,7 @@ class Server:
             self.voted_for = None  # Reset vote
         
         # Reject vote if already voted in this term
-        if self.voted_for is not None and self.voted_for != candidate_id:
+        if self.voted_for is not None:
             print(f"Already voted for {self.voted_for} in term {self.current_term}, rejecting {candidate_id}")
             return
         
@@ -156,11 +209,101 @@ class Server:
             return
 
         # Grant vote
-        if self.voted_for is None:
-            self.voted_for = candidate_id
-            response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
-            self.send_message(response, addr)
-            print(f"Voted for {candidate_id} in term {term}")
+        self.voted_for = candidate_id
+        response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
+        self.send_message(response, addr)
+        print(f"Voted for {candidate_id} in term {term}")
+
+    def handle_client_request(self, message, addr):
+        """Handles incoming client request by adding a new log entry and replicating it to followers."""
+        transaction = Transaction(sender=message.get("sender"), receiver=message.get("receiver"), amount=message.get("amount"))
+        new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
+        
+        self.log.append(new_log_entry)  # Append to leader log
+        print(f"Leader {self.my_address} appended new log entry: {transaction}")
+
+        # Send AppendEntries to all followers
+        self.replicate_log()
+
+    def send_append_entries(self, addr):
+        """Leader sends AppendEntries RPC to a follower starting from nextIndex[addr]."""
+        if addr not in self.nextIndex:
+            self.nextIndex[addr] = len(self.log)  # Initialize nextIndex for new leader
+
+        prev_log_index = self.nextIndex[addr] - 1
+        prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
+
+        # Send all missing log entries starting from nextIndex
+        entries = [{"term": entry.term, "command": entry.command} for entry in self.log[self.nextIndex[addr]:]]
+        message = AppendEntries(
+            term=self.current_term,
+            leader_id=self.my_address,
+            prev_log_index=prev_log_index,
+            prev_log_term=prev_log_term,
+            entries=entries,
+            leader_commit=self.commit_index
+        ).to_dict()
+
+        self.send_message(message, addr)
+        print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
+
+    def update_commit_index(self):
+        """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
+        for index in range(len(self.log) - 1, self.commit_index, -1):  # Iterate backward from last entry to commit_index
+            match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
+
+            # If a majority of servers have this entry and it's from the current term, commit it
+            if match_count > len(self.server_addresses) // 2 and self.log[index].term == self.current_term:
+                self.commit_index = index
+                self.apply_committed_entries()
+                print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
+                return
+
+    def replicate_log(self):
+        """Leader sends AppendEntries RPC to a follower starting from nextIndex[addr]."""
+        for server in self.server_addresses:
+            self.send_append_entries(server)
+
+        # Wait for acknowledgments and retry if log inconsistency is detected
+        start_time = time.time()
+        acks_received = 1  # Leader counts itself
+
+        while time.time() - start_time < 3:  # Wait 3 seconds for responses
+            try:
+                data, addr = self.socket.recvfrom(4096)
+                response = json.loads(data.decode('utf-8'))
+
+                if response.get("msg_type") == "APPEND_ACK":
+                    if response.get("success"):
+                        acks_received += 1
+                        self.match_index[addr] = self.next_index[addr] - 1
+                        self.next_index[addr] = len(self.log)  # Move next_index forward
+
+                        # If a majority has replicated, update commit index
+                        if acks_received > len(self.server_addresses) // 2:
+                            self.update_commit_index()
+                            # Send heartbeats to notify followers about committed index
+                            self.send_heartbeats()
+                            return
+                    else:
+                        print(f"Log inconsistency detected with {addr}, decrementing nextIndex and retrying...")
+                        self.nextIndex[addr] = max(0, self.nextIndex[addr] - 1)  # Move nextIndex back and retry
+                        self.replicate_log(addr)
+                        return
+
+            except socket.timeout:
+                break  # Timeout, no majority reached
+
+    def apply_committed_entries(self):
+        """Apply committed log entries to the state machine."""
+        print(f"{self.my_address} committing entries up to index {self.commit_index}")
+
+        # Apply commands from the log that have not been applied to state machine yet
+        for i in range(self.last_applied + 1, self.commit_index + 1):
+            print(f"Executing command: {self.log[i].command}")
+
+        self.last_applied = self.commit_index  # Update last applied index
+
 
     def listen(self):
         # Listen for incoming UDP messages
@@ -177,6 +320,8 @@ class Server:
                     self.handle_append_entries(message_data, addr)
                 elif msg_type == "REQUEST_VOTE":
                     self.handle_vote_request(message_data, addr)
+                elif msg_type == "CLIENT_REQUEST" and self.role == "leader":
+                    self.handle_client_request(message_data, addr)  # Process client request
 
                 print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
 

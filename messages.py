@@ -41,3 +41,9 @@ class VoteResponse(Message):
         super().__init__("VOTE_RESPONSE")
         self.term = term
         self.vote_granted = vote_granted
+
+class AppendAck(Message):
+    """Response to an AppendEntries RPC."""
+    def __init__(self, success):
+        super().__init__("APPEND_ACK")
+        self.success = success

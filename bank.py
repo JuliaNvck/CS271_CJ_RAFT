@@ -50,7 +50,7 @@ class Server:
         self.voted_for = None
         self.log = []  # Transaction log
         self.commit_index = -1  # Index of highest log entry known to be committed
-        self.last_applied = 0
+        self.last_applied = -1
         self.next_index = {} # Index of the next log entry to send to each follower
         self.match_index = {} # Index of the highest log entry known to be replicated on a server
         self.role = "follower"  # Initial state is follower
@@ -139,6 +139,7 @@ class Server:
                 leader_commit=self.commit_index
                 ).to_dict()
             
+            print(f"HEARTBEAT")
             self.broadcast_message(message, "APPEND_ENTRIES")
             time.sleep(3) # heartbeat interval
             
@@ -154,7 +155,10 @@ class Server:
         prev_log_index = message.get("prev_log_index")
         prev_log_term = message.get("prev_log_term")
         entries = message.get("entries", [])
-        leader_commit = message.get("leader_commit", 0)
+        leader_commit = message.get("leader_commit", -1)
+
+        if len(entries) == 0:
+            print(f"HEARTBEAT from {leader_id} for term {term}")
 
         if prev_log_index is None:
             prev_log_index = -1
@@ -191,6 +195,8 @@ class Server:
         for entry in entries:
             sender = entry["transaction"]["sender"]
             receiver = entry["transaction"]["receiver"]
+            print(f"sender: {sender}, receiver: {receiver}")
+            print(f"entry: {entry}")
 
             # Lock accounts on followers
             self.locks.setdefault(sender, False)
@@ -199,10 +205,11 @@ class Server:
             self.locks[receiver] = True
 
             self.log.append(LogEntry(term=entry["term"], transaction=entry["transaction"]))
+            print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
 
         # Update commit index
-        if message.get("leader_commit", -1) > self.commit_index:
-            self.commit_index = min(message.get("leader_commit", -1), len(self.log) - 1)
+        if leader_commit > self.commit_index:
+            self.commit_index = min(leader_commit, len(self.log) - 1)
 
         # Advance state machine with newly committed entries
         if self.commit_index > -1:
@@ -212,7 +219,7 @@ class Server:
         response = AppendAck(success=True).to_dict()
         self.send_message(response, addr)
 
-        print(f"Follower {self.my_address} commit index: {self.commit_index}")
+        print(f"commit index: {self.commit_index}")
 
                 
     def handle_vote_request(self, message, addr):
@@ -253,11 +260,12 @@ class Server:
 
     def handle_client_request(self, message, addr):
         """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
-        sender = message.get("sender")
-        receiver = message.get("receiver")
-        amount = message.get("amount")
+        sender = int(message.get("sender"))
+        receiver = int(message.get("receiver"))
+        amount = int(message.get("amount"))
         self.client_addr = addr  # Track client address
-
+        print(f"Received client request: {sender} sends ${amount} to {receiver}")
+        
         # Check if sender has sufficient balance
         if self.data_store[sender] < amount:
             print(f"Transaction rejected: {sender} has insufficient balance.")
@@ -266,8 +274,11 @@ class Server:
          # Set a timeout limit (e.g., 5 seconds)
         timeout = 5  # seconds
         start_time = time.time()
+        
         # Wait until both accounts are unlocked
         while self.locks[sender] or self.locks[receiver]:
+            print(f"Waiting for {sender} and {receiver} to unlock...")
+            print(f"Sender lock: {self.locks[sender]}, Receiver lock: {self.locks[receiver]}")
             if time.time() - start_time > timeout:
                 print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
                 return  # Abort the transaction
@@ -283,7 +294,7 @@ class Server:
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
         new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
         self.log.append(new_log_entry)  # Append to leader log
-        print(f"Leader {self.my_address} appended new log entry: {transaction}")
+        print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
 
         # Send AppendEntries to all followers
         self.replicate_log()
@@ -297,7 +308,7 @@ class Server:
         prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
 
         # Send all missing log entries starting from next_index
-        entries = [{"term": entry.term, "command": entry.command} for entry in self.log[self.next_index[addr]:]]
+        entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
         message = AppendEntries(
             term=self.current_term,
             leader_id=self.my_address,
@@ -313,11 +324,13 @@ class Server:
     def update_commit_index(self):
         """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
         for index in range(len(self.log) - 1, self.commit_index, -1):  # Iterate backward from last entry to commit_index
+            # find number of servers with log entry >= index (excluding leader)
             match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
 
             # If a majority of servers have this entry and it's from the current term, commit it
-            if match_count > len(self.server_addresses) // 2 and self.log[index].term == self.current_term:
+            if match_count > (len(self.server_addresses) - 1) // 2 and self.log[index].term == self.current_term:
                 self.commit_index = index
+                print(f"{self.my_address} updated commit index to {self.commit_index}")
                 self.apply_committed_entries()
                 print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
                 return
@@ -331,19 +344,24 @@ class Server:
         start_time = time.time()
         acks_received = 1  # Leader counts itself
 
-        while time.time() - start_time < 3:  # Wait 3 seconds for responses
+        while time.time() - start_time < 7:  # Wait 3 seconds for responses
             try:
                 data, addr = self.socket.recvfrom(4096)
                 response = json.loads(data.decode('utf-8'))
+                print(f"Received message from {addr}: {response}")
 
                 if response.get("msg_type") == "APPEND_ACK":
                     if response.get("success"):
+                        print(f"Received ACK from {addr}")
                         acks_received += 1
-                        self.match_index[addr] = self.next_index[addr] - 1
                         self.next_index[addr] = len(self.log)  # Move next_index forward
+                        self.match_index[addr] = self.next_index[addr] - 1
+                        print(f"Match index for {addr}: {self.match_index[addr]}")
+                        print(f"Next index for {addr}: {self.next_index[addr]}")
 
                         # If a majority has replicated, update commit index
                         if acks_received > len(self.server_addresses) // 2:
+                            print(f"Majority reached with {acks_received} ACKs")
                             self.update_commit_index()
                             # Send heartbeats to notify followers about committed index
                             self.send_heartbeats()
@@ -361,7 +379,7 @@ class Server:
         """Apply committed log entries to the state machine."""
         print(f"{self.my_address} committing entries up to index {self.commit_index}")
 
-        # Apply commands from the log that have not been applied to state machine yet
+        # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
             transaction = self.log[i].transaction # Get transaction from log
             sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
@@ -376,7 +394,7 @@ class Server:
             # Leader notifies client
             if self.role == "leader":
                 response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
-                self.send_message(response, self.client_addr)
+                self.send_message(vars(response), self.client_addr)
             
         # Unlock sender and receiver
         self.locks[sender] = False
@@ -398,7 +416,10 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
-                print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
+                if msg_type == "CLIENT_REQUEST":
+                    print(f"\nReceived {msg_type} from {addr}")
+                else:
+                    print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
 
                 if msg_type == "APPEND_ENTRIES":
                     self.handle_append_entries(message_data, addr)

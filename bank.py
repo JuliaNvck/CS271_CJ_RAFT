@@ -49,7 +49,7 @@ class Server:
         self.current_term = 0
         self.voted_for = None
         self.log = []  # Transaction log
-        self.commit_index = 0
+        self.commit_index = -1  # Index of highest log entry known to be committed
         self.last_applied = 0
         self.next_index = {} # Index of the next log entry to send to each follower
         self.match_index = {} # Index of the highest log entry known to be replicated on a server
@@ -78,7 +78,7 @@ class Server:
             last_log_index=len(self.log)-1, 
             last_log_term=self.log[-1].term if self.log else None
             ).to_dict()
-        self.broadcast_message(message)
+        self.broadcast_message(message, "REQUEST_VOTE")
 
         # Wait for votes
         start_time = time.time()
@@ -138,8 +138,8 @@ class Server:
                 leader_commit=self.commit_index
                 ).to_dict()
             
-            self.broadcast_message(message)
-            time.sleep(1) # heartbeat interval
+            self.broadcast_message(message, "APPEND_ENTRIES")
+            time.sleep(3) # heartbeat interval
 
     def handle_append_entries(self, message, addr):
         """Handle incoming AppendEntries RPC: heartbeats & log replication."""
@@ -149,6 +149,11 @@ class Server:
         prev_log_term = message.get("prev_log_term")
         entries = message.get("entries", [])
         leader_commit = message.get("leader_commit", 0)
+
+        if prev_log_index is None:
+            prev_log_index = -1
+        if prev_log_term is None:
+            prev_log_term = 0
 
         # Reject if term < current term
         if term < self.current_term:
@@ -163,12 +168,13 @@ class Server:
         
         self.last_heartbeat = time.time() # Reset election timeout
 
-       # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match   
-        if prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term:
+       # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match
+        # FIXME: Check if prev_log_index is -1????    
+        if (prev_log_index != -1) and (prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term):
             print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
             # FIXME: unlock accounts???
             response = AppendAck(success=False).to_dict()
-            self.send_message(response, leader_id)
+            self.send_message(response, addr)
             return
         
         # If existing entries conflict with new entries, delete all existing entries starting with first conflicting entry
@@ -189,25 +195,31 @@ class Server:
             self.log.append(LogEntry(term=entry["term"], transaction=entry["transaction"]))
 
         # Update commit index
-        if message.get("leader_commit", 0) > self.commit_index:
-            self.commit_index = min(message.get("leader_commit", 0), len(self.log) - 1)
+        if message.get("leader_commit", -1) > self.commit_index:
+            self.commit_index = min(message.get("leader_commit", -1), len(self.log) - 1)
 
         # Advance state machine with newly committed entries
-        self.apply_committed_entries()
+        if self.commit_index > -1:
+            self.apply_committed_entries()
 
         # Send ACK to leader
         response = AppendAck(success=True).to_dict()
-        self.send_message(response, leader_id)
+        self.send_message(response, addr)
 
-        print(f"Follower {self.my_address} updated log, commit index: {self.commit_index}")
+        print(f"Follower {self.my_address} commit index: {self.commit_index}")
 
                 
     def handle_vote_request(self, message, addr):
         """Handle incoming RequestVote RPC."""
         term = message.get("term")
-        candidate_id = message.get("candidate_id")
+        candidate_id = tuple(message.get("candidate_id"))
         last_log_index = message.get("last_log_index")
         last_log_term = message.get("last_log_term")
+        
+        if last_log_index is None:
+            last_log_index = -1
+        if last_log_term is None:
+            last_log_term = 0
 
         # Step down if term is higher
         if term > self.current_term:
@@ -380,14 +392,14 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
+                print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
+
                 if msg_type == "APPEND_ENTRIES":
                     self.handle_append_entries(message_data, addr)
                 elif msg_type == "REQUEST_VOTE":
                     self.handle_vote_request(message_data, addr)
                 elif msg_type == "CLIENT_REQUEST" and self.role == "leader":
                     self.handle_client_request(message_data, addr)  # Process client request
-
-                print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
 
             except socket.timeout:
                 # If no leader heartbeat is received, start an election
@@ -397,7 +409,7 @@ class Server:
                 print(f"Error receiving data: {e}")
                 break
     
-    def broadcast_message(self, message):
+    def broadcast_message(self, message, type=""):
         # Broadcast message to all other servers
         # serialize message
         serialized_message = json.dumps(message).encode('utf-8')
@@ -405,7 +417,7 @@ class Server:
         for server in self.server_addresses:
             try:
                 self.socket.sendto(serialized_message, server)  # send the message via UDP
-                print(f"Broadcasted message to {SERVER_NAMES[server]}")
+                print(f"Broadcasted {type} message to {SERVER_NAMES[server]}")
             except Exception as e:
                 print(f"Error broadcasting to {server}: {e}")
     
@@ -413,7 +425,8 @@ class Server:
         # Send message to specific server
         # serialize message
         serialized_message = json.dumps(message).encode('utf-8') 
-        receiver_addr = DEFAULT_SERVERS[receiver - 1]
+        # receiver_addr = DEFAULT_SERVERS[receiver - 1]
+        receiver_addr = receiver
         try:
             self.socket.sendto(serialized_message, receiver_addr)  # send the message via UDP
             print(f"Sent message to {SERVER_NAMES[receiver_addr]}: {message}")
@@ -438,7 +451,8 @@ class Server:
                 # validate receiver input
                 if receiver.isdigit() and 1 <= int(receiver) <= 3:
                     receiver = int(receiver)
-                    self.send_message(message, receiver)
+                    receiver_addr = DEFAULT_SERVERS[receiver - 1]
+                    self.send_message(message, receiver_addr)
                 else:
                     print("Invalid receiver. Please enter 1, 2, or 3.")
             else:
@@ -467,7 +481,7 @@ def main():
     server_addresses = [addr for addr in DEFAULT_SERVERS if addr != (my_ip, my_port)]
 
     # Create and run server instance
-    server = Server(my_ip, my_port, server_addresses)
+    server = Server(my_ip, my_port, server_addresses, 1)
     server.run()
 
 if __name__ == "__main__":

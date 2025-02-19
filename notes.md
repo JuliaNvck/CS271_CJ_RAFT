@@ -5,6 +5,17 @@ STEPS
 4. define clusters, add more clients to clusters
 5. 2PC
 
+transactions.csv: 
+1, 2, 3
+2, 3, 2
+3, 1, 4
+1, 3, 1
+2, 1, 5
+3, 2, 3
+1, 2, 2
+2, 3, 1
+3, 1, 2
+1, 3, 3
 
 
 

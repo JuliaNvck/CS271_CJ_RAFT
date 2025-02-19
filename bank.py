@@ -115,7 +115,8 @@ class Server:
                     # update next_index for all followers
                     for server in self.server_addresses:
                         self.next_index[server] = len(self.log)
-                    self.send_heartbeats()
+                    # Start heartbeat thread
+                    threading.Thread(target=self.send_heartbeats, daemon=True).start()
                     return  # Exit election loop
                 
             except socket.timeout:
@@ -140,6 +141,11 @@ class Server:
             
             self.broadcast_message(message, "APPEND_ENTRIES")
             time.sleep(3) # heartbeat interval
+            
+            # If a higher term is received, leader should step down
+            if self.role != "leader":
+                print("Stepping down from leader role, stopping heartbeats.")
+                break
 
     def handle_append_entries(self, message, addr):
         """Handle incoming AppendEntries RPC: heartbeats & log replication."""

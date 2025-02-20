@@ -215,9 +215,9 @@ class Server:
         if leader_commit > self.commit_index:
             self.commit_index = min(leader_commit, len(self.log) - 1)
 
-        # Advance state machine with newly committed entries
-        if self.commit_index > -1:
-            self.apply_committed_entries()
+            # Advance state machine with newly committed entries
+            if self.commit_index > -1:
+                self.apply_committed_entries()
 
         # Send ACK to leader
         response = AppendAck(success=True).to_dict()
@@ -268,6 +268,7 @@ class Server:
         receiver = int(message.get("receiver"))
         amount = int(message.get("amount"))
         self.client_addr = addr  # Track client address
+        print(f"Client address: {self.client_addr}")
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
         # Check if sender has sufficient balance
@@ -302,42 +303,6 @@ class Server:
 
         # Send AppendEntries to all followers
         self.replicate_log()
-
-    def send_append_entries(self, addr):
-        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
-        if addr not in self.next_index:
-            self.next_index[addr] = len(self.log)  # Initialize next_index for new leader
-
-        prev_log_index = self.next_index[addr] - 1
-        prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
-
-        # Send all missing log entries starting from next_index
-        entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
-        message = AppendEntries(
-            term=self.current_term,
-            leader_id=self.my_address,
-            prev_log_index=prev_log_index,
-            prev_log_term=prev_log_term,
-            entries=entries,
-            leader_commit=self.commit_index
-        ).to_dict()
-
-        self.send_message(message, addr)
-        print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
-
-    def update_commit_index(self):
-        """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
-        for index in range(len(self.log) - 1, self.commit_index, -1):  # Iterate backward from last entry to commit_index
-            # find number of servers with log entry >= index (excluding leader)
-            match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
-
-            # If a majority of servers have this entry and it's from the current term, commit it
-            if match_count > (len(self.server_addresses) - 1) // 2 and self.log[index].term == self.current_term:
-                self.commit_index = index
-                print(f"{self.my_address} updated commit index to {self.commit_index}")
-                self.apply_committed_entries()
-                print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
-                return
 
     def replicate_log(self):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
@@ -378,6 +343,42 @@ class Server:
 
             except socket.timeout:
                 break  # Timeout, no majority reached
+    
+    def send_append_entries(self, addr):
+        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
+        if addr not in self.next_index:
+            self.next_index[addr] = len(self.log)  # Initialize next_index for new leader
+
+        prev_log_index = self.next_index[addr] - 1
+        prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
+
+        # Send all missing log entries starting from next_index
+        entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
+        message = AppendEntries(
+            term=self.current_term,
+            leader_id=self.my_address,
+            prev_log_index=prev_log_index,
+            prev_log_term=prev_log_term,
+            entries=entries,
+            leader_commit=self.commit_index
+        ).to_dict()
+
+        self.send_message(message, addr)
+        print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
+
+    def update_commit_index(self):
+        """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
+        for index in range(len(self.log) - 1, self.commit_index, -1):  # Iterate backward from last entry to commit_index
+            # find number of servers with log entry >= index (excluding leader)
+            match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
+
+            # If a majority of servers have this entry and it's from the current term, commit it
+            if match_count > (len(self.server_addresses) - 1) // 2 and self.log[index].term == self.current_term:
+                self.commit_index = index
+                print(f"{self.my_address} updated commit index to {self.commit_index}")
+                self.apply_committed_entries()
+                print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
+                return
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
@@ -385,6 +386,7 @@ class Server:
 
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
+            print(f"Applying log entry at index {i}")
             transaction = self.log[i].transaction # Get transaction from log
             print(f"Applying transaction: {transaction} and type: {type(transaction)}")
             sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
@@ -398,9 +400,13 @@ class Server:
             print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
             # Leader notifies client
-            if self.role == "leader":
+            if self.role == "leader" and self.client_addr:
+                print(f"Leader {self.my_address} sending response to client: {self.client_addr}")
                 response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
-                self.send_message(vars(response), self.client_addr)
+                print(f"Leader {self.my_address} sending response to client: {vars(response)}")
+
+                # Send cleint response
+                self.send_client_response(vars(response), self.client_addr)
             
         # Unlock sender and receiver
         self.locks[sender] = False
@@ -410,6 +416,15 @@ class Server:
 
         print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
 
+    def send_client_response(self, response, receiver):
+        # Send response to client
+        # serialize message
+        serialized_message = json.dumps(response).encode('utf-8') 
+        try:
+            self.socket.sendto(serialized_message, receiver)  # send the message via UDP
+            print(f"Leader {self.my_address} sent response to client: {response}")
+        except Exception as e:
+            print(f"Error sending message to {receiver}: {e}")
 
     def listen(self):
         # Listen for incoming UDP messages
@@ -422,7 +437,10 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
-                if msg_type == "CLIENT_REQUEST" or msg_type == "CLIENT_RESPONSE":
+                # Ignore messages that are meant for clients
+                if msg_type == "CLIENT_RESPONSE":
+                    continue  # Skip processing
+                if msg_type == "CLIENT_REQUEST":
                     print(f"\nReceived {msg_type} from {addr}")
                 else:
                     print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")

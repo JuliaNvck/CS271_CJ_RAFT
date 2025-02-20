@@ -8,6 +8,10 @@ import time
 # Server list (UDP addresses)
 SERVERS = [("127.0.0.1", 5000), ("127.0.0.1", 5001), ("127.0.0.1", 5002)]
 
+# Define a fixed port for the client to listen on
+CLIENT_HOST = "127.0.0.1"
+CLIENT_PORT = 6000  # Choose a specific port for listening
+
 def read_input_file(file_path):
     """Reads the input file containing (x, y, amt) transactions."""
     transactions = []
@@ -30,15 +34,21 @@ def send_transaction(x, y, amt):
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:  # UDP socket
         sock.settimeout(6)  # Timeout for response
         try:
+            # Bind the socket to a specific port
+            sock.bind((CLIENT_HOST, CLIENT_PORT))
             sock.sendto(serialized_message, server)
             print(f"Sent message to {server}: {message.to_dict()}")
 
+            while True:
             # Listen for a response from the leader
-            response, _ = sock.recvfrom(4096)
-            response_data = json.loads(response.decode("utf-8"))
-            print(f"Received response: {response_data}")
-        except socket.timeout:
-            print("Timeout: No response from the server.")
+                try: 
+                    response, _ = sock.recvfrom(4096)
+                    response_data = json.loads(response.decode("utf-8"))
+                    print(f"Received response: {response_data}")
+                except socket.timeout:
+                    print("Timeout: No response from the server.")
+                    continue  # Keep waiting for responses
+        
         except Exception as e:
             print(f"Error communicating with server: {e}")
 

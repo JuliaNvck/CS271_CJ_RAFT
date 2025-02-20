@@ -17,7 +17,8 @@ transactions.csv:
 3, 1, 2
 1, 3, 3
 
-
+JULIA NOTES: 
+- fix heartbeat vs append entries logging
 
 1. Setup and Preparation
 Install any required libraries: asyncio, grpc (for RPC communication), and optionally sqlalchemy for database operations.

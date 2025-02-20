@@ -197,6 +197,10 @@ class Server:
             receiver = entry["transaction"]["receiver"]
             print(f"sender: {sender}, receiver: {receiver}")
             print(f"entry: {entry}")
+            transaction=entry["transaction"]
+            # Create transaction object from dict
+            if isinstance(transaction, dict):
+                transaction = Transaction(transaction["sender"], transaction["receiver"], transaction["amount"])
 
             # Lock accounts on followers
             self.locks.setdefault(sender, False)
@@ -204,7 +208,7 @@ class Server:
             self.locks[sender] = True
             self.locks[receiver] = True
 
-            self.log.append(LogEntry(term=entry["term"], transaction=entry["transaction"]))
+            self.log.append(LogEntry(term=entry["term"], transaction=transaction))
             print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
 
         # Update commit index
@@ -382,7 +386,9 @@ class Server:
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
             transaction = self.log[i].transaction # Get transaction from log
+            print(f"Applying transaction: {transaction} and type: {type(transaction)}")
             sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
+            print(f"sender: {sender}, receiver: {receiver}, amount: {amount}")
 
             # Update balances in data store
             self.data_store.setdefault(sender, 0)
@@ -402,7 +408,7 @@ class Server:
 
         self.last_applied = self.commit_index  # Update last applied index
 
-        print(f"{self.my_address} Account Balances: {self.data_store}")
+        print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
 
 
     def listen(self):
@@ -416,7 +422,7 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
-                if msg_type == "CLIENT_REQUEST":
+                if msg_type == "CLIENT_REQUEST" or msg_type == "CLIENT_RESPONSE":
                     print(f"\nReceived {msg_type} from {addr}")
                 else:
                     print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")

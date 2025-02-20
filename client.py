@@ -28,11 +28,19 @@ def send_transaction(x, y, amt):
     serialized_message = json.dumps(message.to_dict()).encode('utf-8')
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:  # UDP socket
+        sock.settimeout(6)  # Timeout for response
         try:
             sock.sendto(serialized_message, server)
             print(f"Sent message to {server}: {message.to_dict()}")
+
+            # Listen for a response from the leader
+            response, _ = sock.recvfrom(4096)
+            response_data = json.loads(response.decode("utf-8"))
+            print(f"Received response: {response_data}")
+        except socket.timeout:
+            print("Timeout: No response from the server.")
         except Exception as e:
-            print(f"Error sending message to {server}: {e}")
+            print(f"Error communicating with server: {e}")
 
 def main():
     if len(sys.argv) != 2:

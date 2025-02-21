@@ -269,7 +269,7 @@ class Server:
         """Adds a transaction request to the queue."""
         try:
             print(f"[{self.my_address}] Enqueuing transaction: {message}")
-            self.transaction_queue.put((message, addr))  # ✅ Add transaction to queue
+            self.transaction_queue.put((message, addr))  # Add transaction to queue
             print(f"[{self.my_address}] Successfully added transaction to queue.")
         except Exception as e:
             print(f"[{self.my_address}] Error enqueueing transaction: {e}")
@@ -279,20 +279,16 @@ class Server:
         print(f"[{self.my_address}] Transaction processor started.")
         while True:
             try:
-                while not self.transaction_queue.empty():  # ✅ Process all queued transactions
-                    message, addr = self.transaction_queue.get_nowait()  # ✅ Non-blocking
-                    print(f"[{self.my_address}] Processing transaction from queue: {message}")
-
-                    if message is None:
-                        print(f"[{self.my_address}] Warning: Received None in transaction queue, skipping.")
-                        continue  # Don't exit, just skip and keep waiting for more transactions
-
-                    self.process_transaction(message, addr)  # ✅ Process transaction normally
-
-                time.sleep(0.1)  # ✅ Short delay to avoid CPU overuse
-
+                print(f"[{self.my_address}] Waiting for transaction in queue...")
+                message, addr = self.transaction_queue.get()  # get next transaction and dequeue
+                print(f"[{self.my_address}] Processing transaction from queue: {message}")
+                self.process_transaction(message, addr)  # Process transaction normally
             except Exception as e:
                 print(f"[{self.my_address}] Error in transaction queue processing: {e}")
+            finally:
+                self.transaction_queue.task_done()
+                print(f"[{self.my_address}] Transaction processing completed.")
+    
 
     def handle_client_request(self, message, addr):
         """Handles client requests by adding transactions to the queue."""
@@ -304,7 +300,6 @@ class Server:
         sender = int(message.get("sender"))
         receiver = int(message.get("receiver"))
         amount = int(message.get("amount"))
-        # self.client_addr = addr  # Track client address
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
         # Check if sender has sufficient balance
@@ -340,46 +335,6 @@ class Server:
         # Send AppendEntries to all followers
         self.replicate_log()
     
-    # def handle_client_request(self, message, addr):
-    #     """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
-    #     sender = int(message.get("sender"))
-    #     receiver = int(message.get("receiver"))
-    #     amount = int(message.get("amount"))
-    #     # self.client_addr = addr  # Track client address
-    #     print(f"Received client request: {sender} sends ${amount} to {receiver}")
-        
-    #     # Check if sender has sufficient balance
-    #     if self.data_store[sender] < amount:
-    #         print(f"Transaction rejected: {sender} has insufficient balance.")
-    #         return
-        
-    #      # Set a timeout limit (e.g., 5 seconds)
-    #     timeout = 5  # seconds
-    #     start_time = time.time()
-        
-    #     # Wait until both accounts are unlocked
-    #     while self.locks[sender] or self.locks[receiver]:
-    #         print(f"Waiting for {sender} and {receiver} to unlock...")
-    #         print(f"Sender lock: {self.locks[sender]}, Receiver lock: {self.locks[receiver]}")
-    #         if time.time() - start_time > timeout:
-    #             print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
-    #             return  # Abort the transaction
-            
-    #         print(f"Waiting: {sender} or {receiver} is locked.")
-    #         time.sleep(0.1)  # Short delay
-        
-    #     # Conditions met: lock both sender and receiver
-    #     self.locks[sender] = True
-    #     self.locks[receiver] = True
-
-    #     # Create log entry and execute RAFT to replicate
-    #     transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
-    #     new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
-    #     self.log.append(new_log_entry)  # Append to leader log
-    #     print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
-
-    #     # Send AppendEntries to all followers
-    #     self.replicate_log()
 
     def replicate_log(self):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
@@ -409,8 +364,6 @@ class Server:
                         if acks_received > len(self.server_addresses) // 2:
                             print(f"Majority reached with {acks_received} ACKs")
                             self.update_commit_index()
-                            # Send heartbeats to notify followers about committed index
-                            self.send_heartbeats()
                             return
                     else:
                         print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
@@ -460,33 +413,39 @@ class Server:
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
         print(f"{self.my_address} committing entries up to index {self.commit_index}")
+        try:
+            # Apply transactions from the log that have not been applied to state machine yet
+            for i in range(self.last_applied + 1, self.commit_index + 1):
+                transaction = self.log[i].transaction # Get transaction from log
+                print(f"Applying transaction: {transaction}")
+                sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
 
-        # Apply transactions from the log that have not been applied to state machine yet
-        for i in range(self.last_applied + 1, self.commit_index + 1):
-            transaction = self.log[i].transaction # Get transaction from log
-            print(f"Applying transaction: {transaction}")
-            sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
+                # Update balances in data store
+                self.data_store.setdefault(sender, 0)
+                self.data_store.setdefault(receiver, 0)
+                self.data_store[sender] -= amount
+                self.data_store[receiver] += amount
+                print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
-            # Update balances in data store
-            self.data_store.setdefault(sender, 0)
-            self.data_store.setdefault(receiver, 0)
-            self.data_store[sender] -= amount
-            self.data_store[receiver] += amount
-            print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+                # Leader notifies client
+                if self.role == "leader" and self.client_addr:
+                    response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
+                    # Send cleint response
+                    self.send_client_response(vars(response), self.client_addr)
+                
+            # Unlock sender and receiver
+            self.locks[sender] = False
+            self.locks[receiver] = False
+            print(f"Unlocked sender {sender} and receiver {receiver}")
 
-            # Leader notifies client
-            if self.role == "leader" and self.client_addr:
-                response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
-                # Send cleint response
-                self.send_client_response(vars(response), self.client_addr)
-            
-        # Unlock sender and receiver
-        self.locks[sender] = False
-        self.locks[receiver] = False
+            self.last_applied = self.commit_index  # Update last applied index
 
-        self.last_applied = self.commit_index  # Update last applied index
+            print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
 
-        print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
+        finally:
+            print(f"Releasing locks for {sender} and {receiver}")
+            self.locks[sender] = False
+            self.locks[receiver] = False
 
     def send_client_response(self, response, receiver):
         # Send response to client
@@ -582,16 +541,18 @@ class Server:
             else:
                 print("Invalid amount. Please enter a valid integer.")
 
+    def monitor_queue(self):
+        while True:
+            print(f"[{self.my_address}] Queue size: {self.transaction_queue.qsize()}")
+            time.sleep(2)
+    
     def run(self):
         # Start listening thread
         threading.Thread(target=self.listen, daemon=True).start()
         threading.Thread(target=self.process_transaction_queue, daemon=True).start()
 
         # Monitor if queue thread is alive (debugging)
-        def monitor_queue():
-            while True:
-                time.sleep(5)
-                print(f"[{self.my_address}] Queue size: {self.transaction_queue.qsize()}")
+        threading.Thread(target=self.monitor_queue, daemon=True).start()
         
         # get user input & handle
         self.get_user_input()

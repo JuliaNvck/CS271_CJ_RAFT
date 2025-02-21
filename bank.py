@@ -50,6 +50,7 @@ class Server:
 
         # RAFT variables
         self.current_term = 0
+        self.current_leader = None
         self.voted_for = None
         self.log = []  # Transaction log
         self.commit_index = -1  # Index of highest log entry known to be committed
@@ -181,6 +182,11 @@ class Server:
         
         self.last_heartbeat = time.time() # Reset election timeout
 
+        # Update known leader on heartbeat
+        if self.role == "follower":
+            self.current_leader = tuple(leader_id)
+            # print(f"Updated current leader to {leader_id}")
+
        # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match
         # FIXME: Check if prev_log_index is -1????    
         if (prev_log_index != -1) and (prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term):
@@ -268,9 +274,8 @@ class Server:
     def enqueue_transaction(self, message, addr):
         """Adds a transaction request to the queue."""
         try:
-            print(f"[{self.my_address}] Enqueuing transaction: {message}")
             self.transaction_queue.put((message, addr))  # Add transaction to queue
-            print(f"[{self.my_address}] Successfully added transaction to queue.")
+            print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
         except Exception as e:
             print(f"[{self.my_address}] Error enqueueing transaction: {e}")
 
@@ -291,8 +296,17 @@ class Server:
     
 
     def handle_client_request(self, message, addr):
-        """Handles client requests by adding transactions to the queue."""
-        self.enqueue_transaction(message, addr)  # Queue the transaction for processing
+        """Handles client requests by redirecting to the leader if necessary or adding transactions to the queue."""
+        if self.role == "leader":
+            # If this server is the leader, process the request
+            self.enqueue_transaction(message, addr)
+        else:
+            # Forward request to leader
+            if self.current_leader:
+                print(f"Redirecting client request to leader at {self.current_leader}")
+                self.send_message(message, self.current_leader)
+            else:
+                print("Error: No known leader to forward request.")
 
     def process_transaction(self, message, addr):
         """Processes a single transaction request."""
@@ -480,9 +494,8 @@ class Server:
                     self.handle_append_entries(message_data, addr)
                 elif msg_type == "REQUEST_VOTE":
                     self.handle_vote_request(message_data, addr)
-                elif msg_type == "CLIENT_REQUEST" and self.role == "leader":
-                    # self.handle_client_request(message_data, addr)  # Process client request
-                    self.enqueue_transaction(message_data, addr)  # Process client request
+                elif msg_type == "CLIENT_REQUEST":
+                    self.handle_client_request(message_data, addr)  # Process client request
 
             except socket.timeout:
                 # If no leader heartbeat is received, start an election
@@ -508,13 +521,11 @@ class Server:
         # Send message to specific server
         # serialize message
         serialized_message = json.dumps(message).encode('utf-8') 
-        # receiver_addr = DEFAULT_SERVERS[receiver - 1]
-        receiver_addr = receiver
         try:
-            self.socket.sendto(serialized_message, receiver_addr)  # send the message via UDP
-            print(f"Sent message to {SERVER_NAMES[receiver_addr]}: {message}")
+            self.socket.sendto(serialized_message, receiver)  # send the message via UDP
+            print(f"Sent message to {SERVER_NAMES[receiver]}: {message}")
         except Exception as e:
-            print(f"Error sending message to {SERVER_NAMES[receiver_addr]}: {e}")
+            print(f"Error sending message to {SERVER_NAMES[receiver]}: {e}")
 
     def get_user_input(self):
         while self.running:

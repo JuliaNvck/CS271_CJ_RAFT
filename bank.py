@@ -7,6 +7,7 @@ import hashlib
 import heapq
 import time
 import random
+import queue
 from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest, AppendAck, ClientResponse
 
 
@@ -36,6 +37,8 @@ SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVE
 # Server class (part of a cluster)
 class Server:
     def __init__(self, my_ip, my_port, server_addresses, cluster_id):
+        self.transaction_queue = queue.Queue()  # Queue for pending transactions
+
         self.my_address = (my_ip, my_port) # initialize server with address
         self.server_addresses = server_addresses # list of other peer's addresses
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # udp socket
@@ -56,7 +59,7 @@ class Server:
         self.role = "follower"  # Initial state is follower
         self.election_timeout = random.uniform(3, 6)  # Randomized timeout for leader election: [T, 2T]
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
-        self.client_addr = None  # Track client address
+        self.client_addr = ("127.0.0.1", 6000)  # Track client address
 
         # Initialize data store for transactions
         self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
@@ -262,13 +265,46 @@ class Server:
         self.send_message(response, addr)
         print(f"Voted for {candidate_id} in term {term}")
 
+    def enqueue_transaction(self, message, addr):
+        """Adds a transaction request to the queue."""
+        try:
+            print(f"[{self.my_address}] Enqueuing transaction: {message}")
+            self.transaction_queue.put((message, addr))  # ✅ Add transaction to queue
+            print(f"[{self.my_address}] Successfully added transaction to queue.")
+        except Exception as e:
+            print(f"[{self.my_address}] Error enqueueing transaction: {e}")
+
+    def process_transaction_queue(self):
+        """Continuously processes transactions from the queue."""
+        print(f"[{self.my_address}] Transaction processor started.")
+        while True:
+            try:
+                while not self.transaction_queue.empty():  # ✅ Process all queued transactions
+                    message, addr = self.transaction_queue.get_nowait()  # ✅ Non-blocking
+                    print(f"[{self.my_address}] Processing transaction from queue: {message}")
+
+                    if message is None:
+                        print(f"[{self.my_address}] Warning: Received None in transaction queue, skipping.")
+                        continue  # Don't exit, just skip and keep waiting for more transactions
+
+                    self.process_transaction(message, addr)  # ✅ Process transaction normally
+
+                time.sleep(0.1)  # ✅ Short delay to avoid CPU overuse
+
+            except Exception as e:
+                print(f"[{self.my_address}] Error in transaction queue processing: {e}")
+
     def handle_client_request(self, message, addr):
+        """Handles client requests by adding transactions to the queue."""
+        self.enqueue_transaction(message, addr)  # Queue the transaction for processing
+
+    def process_transaction(self, message, addr):
+        """Processes a single transaction request."""
         """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
         sender = int(message.get("sender"))
         receiver = int(message.get("receiver"))
         amount = int(message.get("amount"))
-        self.client_addr = addr  # Track client address
-        print(f"Client address: {self.client_addr}")
+        # self.client_addr = addr  # Track client address
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
         # Check if sender has sufficient balance
@@ -303,6 +339,47 @@ class Server:
 
         # Send AppendEntries to all followers
         self.replicate_log()
+    
+    # def handle_client_request(self, message, addr):
+    #     """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
+    #     sender = int(message.get("sender"))
+    #     receiver = int(message.get("receiver"))
+    #     amount = int(message.get("amount"))
+    #     # self.client_addr = addr  # Track client address
+    #     print(f"Received client request: {sender} sends ${amount} to {receiver}")
+        
+    #     # Check if sender has sufficient balance
+    #     if self.data_store[sender] < amount:
+    #         print(f"Transaction rejected: {sender} has insufficient balance.")
+    #         return
+        
+    #      # Set a timeout limit (e.g., 5 seconds)
+    #     timeout = 5  # seconds
+    #     start_time = time.time()
+        
+    #     # Wait until both accounts are unlocked
+    #     while self.locks[sender] or self.locks[receiver]:
+    #         print(f"Waiting for {sender} and {receiver} to unlock...")
+    #         print(f"Sender lock: {self.locks[sender]}, Receiver lock: {self.locks[receiver]}")
+    #         if time.time() - start_time > timeout:
+    #             print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
+    #             return  # Abort the transaction
+            
+    #         print(f"Waiting: {sender} or {receiver} is locked.")
+    #         time.sleep(0.1)  # Short delay
+        
+    #     # Conditions met: lock both sender and receiver
+    #     self.locks[sender] = True
+    #     self.locks[receiver] = True
+
+    #     # Create log entry and execute RAFT to replicate
+    #     transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
+    #     new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
+    #     self.log.append(new_log_entry)  # Append to leader log
+    #     print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
+
+    #     # Send AppendEntries to all followers
+    #     self.replicate_log()
 
     def replicate_log(self):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
@@ -386,11 +463,9 @@ class Server:
 
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
-            print(f"Applying log entry at index {i}")
             transaction = self.log[i].transaction # Get transaction from log
-            print(f"Applying transaction: {transaction} and type: {type(transaction)}")
+            print(f"Applying transaction: {transaction}")
             sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
-            print(f"sender: {sender}, receiver: {receiver}, amount: {amount}")
 
             # Update balances in data store
             self.data_store.setdefault(sender, 0)
@@ -401,10 +476,7 @@ class Server:
 
             # Leader notifies client
             if self.role == "leader" and self.client_addr:
-                print(f"Leader {self.my_address} sending response to client: {self.client_addr}")
                 response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
-                print(f"Leader {self.my_address} sending response to client: {vars(response)}")
-
                 # Send cleint response
                 self.send_client_response(vars(response), self.client_addr)
             
@@ -450,7 +522,8 @@ class Server:
                 elif msg_type == "REQUEST_VOTE":
                     self.handle_vote_request(message_data, addr)
                 elif msg_type == "CLIENT_REQUEST" and self.role == "leader":
-                    self.handle_client_request(message_data, addr)  # Process client request
+                    # self.handle_client_request(message_data, addr)  # Process client request
+                    self.enqueue_transaction(message_data, addr)  # Process client request
 
             except socket.timeout:
                 # If no leader heartbeat is received, start an election
@@ -512,6 +585,14 @@ class Server:
     def run(self):
         # Start listening thread
         threading.Thread(target=self.listen, daemon=True).start()
+        threading.Thread(target=self.process_transaction_queue, daemon=True).start()
+
+        # Monitor if queue thread is alive (debugging)
+        def monitor_queue():
+            while True:
+                time.sleep(5)
+                print(f"[{self.my_address}] Queue size: {self.transaction_queue.qsize()}")
+        
         # get user input & handle
         self.get_user_input()
 

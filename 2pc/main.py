@@ -3,8 +3,8 @@ import sys
 import json
 import time
 from udp_messenger import UDPMessenger
-from coordinator import ClientCoordinator
-from server import ParticipantServer
+from client import Client
+from server import Server
 
 def main():
     if len(sys.argv) < 2:
@@ -32,17 +32,17 @@ def main():
 
     # Determine role
     if my_port == coordinator_config["port"]:
-        # Run as Coordinator
-        coordinator = ClientCoordinator(messenger, server_addresses)
-        print("Running as Coordinator...")
+        # Run as Client (Coordinator)
+        client = Client(messenger, server_addresses)
+        print("Running as Client (Coordinator)...")
         while True:
             data = input("Enter transaction data (or 'exit' to quit): ")
             if data.lower() == "exit":
                 break
-            coordinator.initiate_transaction(data)
+            client.initiate_transaction(data)
     else:
-        # Run as Participant
-        participant = ParticipantServer(messenger, coordinator_addr)
+        # Run as Server
+        server = Server(messenger, coordinator_addr)
         print(f"Running as Server on port {my_port}...")
         while True:
             # Keep the server running

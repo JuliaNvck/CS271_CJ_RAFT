@@ -3,6 +3,7 @@ import socket
 import json
 import threading
 import logging
+from message import Message  # Import the Message class
 
 class UDPMessenger:
     def __init__(self, my_ip, my_port, server_addresses, message_handler=None, log_level="info"):
@@ -40,39 +41,43 @@ class UDPMessenger:
             try:
                 self.socket.settimeout(1)  # Set timeout to periodically check running flag
                 data, addr = self.socket.recvfrom(2048)  # Receive message
-                message = json.loads(data.decode('utf-8'))  # Decode message
+                message_dict = json.loads(data.decode('utf-8'))  # Decode message
+
+                # Convert the dictionary to a Message object
+                message = Message.from_dict(message_dict)
 
                 # Log the received message
-                self.logger.info(f"[RX] {message['type']} {addr[1]}")  # Log port only
-                self.logger.debug(f"Received raw message from {addr}: {message}")
+                self.logger.info(f"[RX] {addr[1]} {message.msg_type}")
+                self.logger.debug(f"[RX] {addr[1]} {message_dict}")
 
                 # Pass the message to the handler (if provided)
                 if self.message_handler:
                     self.message_handler(message, addr)
             except socket.timeout:
                 continue
-            except Exception as e:
-                self.logger.error(f"Error receiving data: {e}")
-                break
 
     def broadcast_message(self, message):
         """Broadcast a message to all servers."""
-        serialized_message = json.dumps(message).encode('utf-8')
+        if not isinstance(message, Message):
+            raise ValueError("Message must be an instance of Message class")
+        serialized_message = json.dumps(message.to_dict()).encode('utf-8')
         for server in self.server_addresses:
             try:
                 self.socket.sendto(serialized_message, server)
-                self.logger.info(f"[TX] {message['type']} {server[1]}")  # Log port only
-                self.logger.debug(f"Broadcasted message to {server}: {message}")
+                self.logger.info(f"[TX] {server[1]} {message.msg_type}")
+                self.logger.debug(f"Broadcasted message to {server}: {message.to_dict()}")
             except Exception as e:
                 self.logger.error(f"Error broadcasting to {server}: {e}")
 
     def send_message(self, message, receiver):
         """Send a message to a specific server."""
-        serialized_message = json.dumps(message).encode('utf-8')
+        if not isinstance(message, Message):
+            raise ValueError("Message must be an instance of Message class")
+        serialized_message = json.dumps(message.to_dict()).encode('utf-8')
         try:
             self.socket.sendto(serialized_message, receiver)
-            self.logger.info(f"[TX] {message['type']} {receiver[1]}")  # Log port only
-            self.logger.debug(f"Sent message to {receiver}: {message}")
+            self.logger.info(f"[TX] {receiver[1]} {message.msg_type}")
+            self.logger.debug(f"[TX] {receiver[1]} {message.to_dict()}")
         except Exception as e:
             self.logger.error(f"Error sending message to {receiver}: {e}")
 

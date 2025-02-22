@@ -1,7 +1,7 @@
 # server.py
-import logging
+from message import Message, Prepare, Vote, Commit, Abort, Ack
 
-class ParticipantServer:
+class Server:
     def __init__(self, messenger, coordinator_addr):
         self.messenger = messenger
         self.coordinator_addr = coordinator_addr
@@ -12,10 +12,10 @@ class ParticipantServer:
 
     def handle_message(self, message, addr):
         """Handle incoming messages."""
-        if message["type"] == "prepare":
-            self.handle_prepare(message["tx_id"], message["data"])
-        elif message["type"] in ("commit", "abort"):
-            self.handle_decision(message["tx_id"], message["type"])
+        if message.msg_type == "PREPARE":
+            self.handle_prepare(message.tx_id, message.data)
+        elif message.msg_type in ("COMMIT", "ABORT"):
+            self.handle_decision(message.tx_id, message.msg_type)
 
     def handle_prepare(self, tx_id, data):
         """Vote Yes/No during Phase 1."""
@@ -25,17 +25,17 @@ class ParticipantServer:
         if can_commit:
             self.prepared_transactions[tx_id] = data
         
-        vote_msg = {"type": "vote", "tx_id": tx_id, "vote": vote}
+        vote_msg = Vote(tx_id=tx_id, vote=vote)
         self.messenger.send_message(vote_msg, self.coordinator_addr)
 
     def handle_decision(self, tx_id, decision):
         """Commit/Abort during Phase 2."""
-        if decision == "commit":
+        if decision == "COMMIT":
             self._commit(tx_id)
         else:
             self._abort(tx_id)
         
-        ack_msg = {"type": "ack", "tx_id": tx_id}
+        ack_msg = Ack(tx_id=tx_id)
         self.messenger.send_message(ack_msg, self.coordinator_addr)
 
     def _commit(self, tx_id):

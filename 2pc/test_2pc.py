@@ -1,8 +1,8 @@
 # test_2pc.py
 import unittest
 from unittest.mock import MagicMock
-from coordinator import ClientCoordinator
-from server import ParticipantServer
+from client import Client
+from server import Server
 
 class MockUDPMessenger:
     def __init__(self):
@@ -15,11 +15,11 @@ class MockUDPMessenger:
     def send_message(self, message, receiver):
         self.sent_messages.append((message, receiver))
 
-class TestClientCoordinator(unittest.TestCase):
+class TestClient(unittest.TestCase):
     def setUp(self):
         self.messenger = MockUDPMessenger()
         self.server_addresses = [("127.0.0.1", 5001), ("127.0.0.1", 5002)]
-        self.coordinator = ClientCoordinator(self.messenger, self.server_addresses)
+        self.coordinator = Client(self.messenger, self.server_addresses)
 
     def test_initiate_transaction(self):
         """Test that the coordinator sends a Prepare message."""
@@ -44,11 +44,11 @@ class TestClientCoordinator(unittest.TestCase):
         self.assertEqual(len(self.messenger.broadcast_messages), 2)
         self.assertEqual(self.messenger.broadcast_messages[1]["type"], "abort")
 
-class TestParticipantServer(unittest.TestCase):
+class TestServer(unittest.TestCase):
     def setUp(self):
         self.messenger = MockUDPMessenger()
         self.coordinator_addr = ("127.0.0.1", 5000)
-        self.server = ParticipantServer(self.messenger, self.coordinator_addr)
+        self.server = Server(self.messenger, self.coordinator_addr)
 
     def test_handle_prepare_yes(self):
         """Test that the server votes Yes when it can commit."""

@@ -1,24 +1,22 @@
-# coordinator.py
-import threading
-import time
-import logging
+# client.py
+from message import Message, Prepare, Vote, Commit, Abort, Ack
 
-class ClientCoordinator:
+class Client:
     def __init__(self, messenger, server_addresses):
         self.messenger = messenger
         self.server_addresses = server_addresses
         self.transaction_id = 0
         self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}}}
 
-        # Register this coordinator as the message handler
+        # Register this client as the message handler
         self.messenger.message_handler = self.handle_message
 
     def handle_message(self, message, addr):
         """Handle incoming messages."""
-        if message["type"] == "vote":
-            self.handle_vote(message["tx_id"], addr, message["vote"])
-        elif message["type"] == "ack":
-            self.handle_ack(message["tx_id"], addr)
+        if message.msg_type == "VOTE":
+            self.handle_vote(message.tx_id, addr, message.vote)
+        elif message.msg_type == "ACK":
+            self.handle_ack(message.tx_id, addr)
 
     def initiate_transaction(self, data):
         """Phase 1: Send Prepare to all servers."""
@@ -26,7 +24,7 @@ class ClientCoordinator:
         tx_id = self.transaction_id
         self.pending_transactions[tx_id] = {"votes": {}, "acks": {}}
         
-        prepare_msg = {"type": "prepare", "tx_id": tx_id, "data": data}
+        prepare_msg = Prepare(tx_id=tx_id, data=data)
         self.messenger.broadcast_message(prepare_msg)
 
     def handle_vote(self, tx_id, server_addr, vote):
@@ -39,9 +37,8 @@ class ClientCoordinator:
         # Check if all votes received
         if len(self.pending_transactions[tx_id]["votes"]) == len(self.server_addresses):
             all_yes = all(vote == "yes" for vote in self.pending_transactions[tx_id]["votes"].values())
-            decision = "commit" if all_yes else "abort"
-            decision_msg = {"type": decision, "tx_id": tx_id}
-            self.messenger.broadcast_message(decision_msg)
+            decision = Commit(tx_id=tx_id) if all_yes else Abort(tx_id=tx_id)
+            self.messenger.broadcast_message(decision)
 
     def handle_ack(self, tx_id, server_addr):
         """Process acknowledgments after Commit/Abort."""

@@ -3,12 +3,17 @@ import threading
 import sys
 from collections import deque
 import json
-import hashlib
-import heapq
 import time
 import random
 import queue
 from messages import RequestVote, VoteResponse, AppendEntries, ClientRequest, AppendAck, ClientResponse
+
+# Constants
+HEARTBEAT_INTERVAL = 3  # Heartbeat interval (seconds)
+ELECTION_TIMEOUT_RANGE = (3, 6)  # Election timeout range (seconds)
+TRANSACTION_TIMEOUT = 5  # Timeout for acquiring locks (seconds)
+SHARD_SIZE = 1000  # Number of accounts per shard
+CLIENT_ADDR = ("127.0.0.1", 6000)  # Fixed client address
 
 
 class LogEntry:
@@ -38,7 +43,6 @@ SERVER_NAMES = {server: f"Server {i+1}" for i, server in enumerate(DEFAULT_SERVE
 class Server:
     def __init__(self, my_ip, my_port, server_addresses, cluster_id):
         self.transaction_queue = queue.Queue()  # Queue for pending transactions
-
         self.my_address = (my_ip, my_port) # initialize server with address
         self.server_addresses = server_addresses # list of other peer's addresses
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # udp socket
@@ -58,15 +62,29 @@ class Server:
         self.next_index = {} # Index of the next log entry to send to each follower
         self.match_index = {} # Index of the highest log entry known to be replicated on a server
         self.role = "follower"  # Initial state is follower
-        self.election_timeout = random.uniform(3, 6)  # Randomized timeout for leader election: [T, 2T]
+        self.election_timeout = random.uniform(*ELECTION_TIMEOUT_RANGE)  # Randomized timeout for leader election
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
-        self.client_addr = ("127.0.0.1", 6000)  # Track client address
 
         # Initialize data store for transactions
         self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
         # Tracks which accounts are locked
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
 
+    def step_down_to_follower(self, new_term):
+        """Step down to follower upon receiving a higher term."""
+        self.role = "follower"
+        self.current_term = new_term
+        self.voted_for = None
+
+    def become_leader(self):
+        """Transition to leader and start sending heartbeats."""
+        self.role = "leader"
+        print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+        # update next_index for all followers
+        for server in self.server_addresses:
+            self.next_index[server] = len(self.log)
+        # Start heartbeat thread
+        threading.Thread(target=self.send_heartbeats, daemon=True).start()
 
     def start_election(self):
         # Start a new election
@@ -93,18 +111,14 @@ class Server:
 
                 # Step down if a higher term message is received
                 if response.get("term", 0) > self.current_term:
-                    print(f"Received higher term {response.get('term')}, stepping down to follower.")
-                    self.role = "follower"
-                    self.current_term = response.get("term")
-                    self.voted_for = None
+                    # print(f"Received higher term {response.get('term')}, stepping down to follower.")
+                    self.step_down_to_follower(response.get("term"))
                     return  # Stop election process
                 
                 # AppendEntries RPC received from new leader: step down
                 if response.get("msg_type") == "APPEND_ENTRIES" and response.get("term", 0) >= self.current_term:
                     print(f"Received AppendEntries RPC from {response.get('leader_id')}, stepping down to follower.")
-                    self.role = "follower"
-                    self.current_term = response.get("term")
-                    self.voted_for = None
+                    self.step_down_to_follower(response.get("term"))
                     self.last_heartbeat = time.time()  # Reset election timeout
                     return  # Stop election process
                 
@@ -114,13 +128,7 @@ class Server:
                 
                 # Become leader if majority votes received
                 if votes_received > len(self.server_addresses) // 2: # Majority
-                    self.role = "leader"
-                    print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
-                    # update next_index for all followers
-                    for server in self.server_addresses:
-                        self.next_index[server] = len(self.log)
-                    # Start heartbeat thread
-                    threading.Thread(target=self.send_heartbeats, daemon=True).start()
+                    self.become_leader()
                     return  # Exit election loop
                 
             except socket.timeout:
@@ -145,7 +153,7 @@ class Server:
             
             print(f"HEARTBEAT")
             self.broadcast_message(message, "APPEND_ENTRIES")
-            time.sleep(3) # heartbeat interval
+            time.sleep(HEARTBEAT_INTERVAL) # heartbeat interval
             
             # If a higher term is received, leader should step down
             if self.role != "leader":
@@ -273,18 +281,13 @@ class Server:
 
     def enqueue_transaction(self, message, addr):
         """Adds a transaction request to the queue."""
-        try:
-            self.transaction_queue.put((message, addr))  # Add transaction to queue
-            print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
-        except Exception as e:
-            print(f"[{self.my_address}] Error enqueueing transaction: {e}")
+        self.transaction_queue.put((message, addr))  # Add transaction to queue
+        print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
 
     def process_transaction_queue(self):
         """Continuously processes transactions from the queue."""
-        print(f"[{self.my_address}] Transaction processor started.")
         while True:
             try:
-                print(f"[{self.my_address}] Waiting for transaction in queue...")
                 message, addr = self.transaction_queue.get()  # get next transaction and dequeue
                 print(f"[{self.my_address}] Processing transaction from queue: {message}")
                 self.process_transaction(message, addr)  # Process transaction normally
@@ -292,7 +295,6 @@ class Server:
                 print(f"[{self.my_address}] Error in transaction queue processing: {e}")
             finally:
                 self.transaction_queue.task_done()
-                print(f"[{self.my_address}] Transaction processing completed.")
     
 
     def handle_client_request(self, message, addr):
@@ -321,19 +323,13 @@ class Server:
             print(f"Transaction rejected: {sender} has insufficient balance.")
             return
         
-         # Set a timeout limit (e.g., 5 seconds)
-        timeout = 5  # seconds
-        start_time = time.time()
-        
         # Wait until both accounts are unlocked
+        start_time = time.time()
         while self.locks[sender] or self.locks[receiver]:
             print(f"Waiting for {sender} and {receiver} to unlock...")
-            print(f"Sender lock: {self.locks[sender]}, Receiver lock: {self.locks[receiver]}")
-            if time.time() - start_time > timeout:
+            if time.time() - start_time > TRANSACTION_TIMEOUT:
                 print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
                 return  # Abort the transaction
-            
-            print(f"Waiting: {sender} or {receiver} is locked.")
             time.sleep(0.1)  # Short delay
         
         # Conditions met: lock both sender and receiver
@@ -442,10 +438,10 @@ class Server:
                 print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
                 # Leader notifies client
-                if self.role == "leader" and self.client_addr:
+                if self.role == "leader" and CLIENT_ADDR:
                     response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
                     # Send cleint response
-                    self.send_client_response(vars(response), self.client_addr)
+                    self.send_client_response(vars(response), CLIENT_ADDR)
                 
             # Unlock sender and receiver
             self.locks[sender] = False
@@ -526,50 +522,14 @@ class Server:
             print(f"Sent message to {SERVER_NAMES[receiver]}: {message}")
         except Exception as e:
             print(f"Error sending message to {SERVER_NAMES[receiver]}: {e}")
-
-    def get_user_input(self):
-        while self.running:
-            # prompt user for input
-            message = input("Enter amount to transfer (type 'exit' to quit): ")
-            # check if user wants to exit
-            if message.lower() == "exit":
-                print("Exiting...")
-                self.running = False
-                break
-            
-            # validate input is an int
-            if message.isdigit():
-                message = int(message)
-                receiver = input("Enter receiver (1, 2, or 3): ")
-                
-                # validate receiver input
-                if receiver.isdigit() and 1 <= int(receiver) <= 3:
-                    receiver = int(receiver)
-                    receiver_addr = DEFAULT_SERVERS[receiver - 1]
-                    self.send_message(message, receiver_addr)
-                else:
-                    print("Invalid receiver. Please enter 1, 2, or 3.")
-            else:
-                print("Invalid amount. Please enter a valid integer.")
-
-    def monitor_queue(self):
-        while True:
-            print(f"[{self.my_address}] Queue size: {self.transaction_queue.qsize()}")
-            time.sleep(2)
     
     def run(self):
         # Start listening thread
         threading.Thread(target=self.listen, daemon=True).start()
         threading.Thread(target=self.process_transaction_queue, daemon=True).start()
 
-        # Monitor if queue thread is alive (debugging)
-        threading.Thread(target=self.monitor_queue, daemon=True).start()
-        
-        # get user input & handle
-        self.get_user_input()
-
-        self.socket.close()
-        print("Socket closed.")
+        while self.running:
+            time.sleep(1)
 
 def main():
     # read client’s port as arg (run on local host IP) from CLI

@@ -1,17 +1,21 @@
 # server.py
+import os
+import csv
+from shard_manager import ShardManager
 from message import Message, Prepare, Vote, Commit, Abort, Ack
 
 class Server:
-    def __init__(self, messenger, coordinator_addr):
+    def __init__(self, id, cluster, messenger, coordinator_addr):
         self.messenger = messenger
+        self.id = id
+        self.cluster = cluster
         self.coordinator_addr = coordinator_addr
         self.prepared_transactions = {}  # {tx_id: data}
 
-        # Register this server as the message handler
+        self.shard_mgr = ShardManager(self.id, self.cluster)
         self.messenger.message_handler = self.handle_message
 
     def handle_message(self, message, addr):
-        """Handle incoming messages."""
         if message.msg_type == "PREPARE":
             self.handle_prepare(message.tx_id, message.data)
         elif message.msg_type in ("COMMIT", "ABORT"):

@@ -9,10 +9,10 @@ coordinator_ip=$(python3 -c "import json; f=open('$config_file'); data=json.load
 coordinator_port=$(python3 -c "import json; f=open('$config_file'); data=json.load(f); print(data['coordinator']['port']); f.close()")
 servers=$(python3 -c "import json; f=open('$config_file'); data=json.load(f); print('\n'.join([json.dumps(server) for server in data['servers']])); f.close()")
 
-# Launch the coordinator in a new Terminal window
+# Launch the coordinator (Client) in a new Terminal window
 osascript <<EOF
 tell application "Terminal"
-    do script "cd '$current_dir' && python3 main.py $coordinator_port"
+    do script "cd '$current_dir' && python3 client.py $coordinator_port"
 end tell
 EOF
 
@@ -39,7 +39,7 @@ for cluster in "${!clusters[@]}"; do
             # Open a new Terminal window for the first server in the cluster
             osascript <<EOF
 tell application "Terminal"
-    do script "cd '$current_dir' && python3 main.py $port"
+    do script "cd '$current_dir' && python3 server.py $port"
 end tell
 EOF
             first_server=0
@@ -48,12 +48,12 @@ EOF
             osascript <<EOF
 tell application "Terminal"
     activate
-            tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
-            do script "cd '$current_dir' && python3 main.py $port" in front window
+    tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
+    do script "cd '$current_dir' && python3 server.py $port" in front window
 end tell
 EOF
         fi
     done
 done
 
-echo "Coordinator and servers launched successfully."
+echo "Success."

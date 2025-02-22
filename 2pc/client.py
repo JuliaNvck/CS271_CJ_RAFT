@@ -1,5 +1,9 @@
 # client.py
-from message import Message, Prepare, Vote, Commit, Abort, Ack
+import sys
+import json
+import time
+from udp_messenger import UDPMessenger
+from message import ClientRequest, Prepare, Vote, Commit, Abort, Ack
 
 class Client:
     def __init__(self, messenger, server_addresses):
@@ -79,3 +83,51 @@ class Client:
         
         prepare_msg = Prepare(tx_id=tx_id, data=data)
         self.messenger.broadcast_message(prepare_msg)
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 client.py <my_port>")
+        sys.exit(1)
+
+    # Load configuration
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    
+    coordinator_config = config["coordinator"]
+    coordinator_addr = (coordinator_config["ip"], coordinator_config["port"])
+    my_port = int(sys.argv[1])
+
+    # Define server addresses
+    server_addresses = [(s["ip"], s["port"]) for s in config["servers"]]
+
+    # Initialize UDP messenger
+    messenger = UDPMessenger(
+        my_ip="127.0.0.1",
+        my_port=my_port,
+        server_addresses=server_addresses,
+        log_level="info"
+    )
+
+    # Run as Client (Coordinator)
+    client = Client(messenger, server_addresses)
+    print("Running as Client (Coordinator)...")
+
+    transactions = []
+    with open('transactions.csv', "r") as file:
+        for line in file:
+            parts = line.strip().split(",")
+            if len(parts) == 3:
+                x, y, amt = parts
+                transactions.append((int(x.strip()), int(y.strip()), int(amt)))
+    
+    for t in transactions:
+        if client.is_intra_shard_transaction(t):
+            # issue ClientRequest to leader of correct cluster
+            pass
+        else:
+            # issue 2pc transaction
+            client.initiate_transaction(t)
+        time.sleep(5)
+
+if __name__ == "__main__":
+    main()

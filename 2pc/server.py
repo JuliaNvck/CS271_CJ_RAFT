@@ -1,6 +1,9 @@
 # server.py
-import os
-import csv
+import sys
+import json
+import time
+from udp_messenger import UDPMessenger
+from message import ClientRequest
 from shard_manager import ShardManager
 from message import Message, Prepare, Vote, Commit, Abort, Ack
 
@@ -54,3 +57,41 @@ class Server:
     def _can_commit(self, data):
         # Example: Check if transaction is feasible
         return True  # Replace with your logic
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 server.py <my_port>")
+        sys.exit(1)
+
+    # Load configuration
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    
+    coordinator_config = config["coordinator"]
+    coordinator_addr = (coordinator_config["ip"], coordinator_config["port"])
+    my_port = int(sys.argv[1])
+    for s in config["servers"]:
+        if s["port"] == my_port:
+            my_id = s["id"]
+            my_cluster = s["cluster"]
+
+    # Define server addresses (exclude current port)
+    server_addresses = [(s["ip"], s["port"]) for s in config["servers"] if s["port"] != my_port]
+
+    # Initialize UDP messenger
+    messenger = UDPMessenger(
+        my_ip="127.0.0.1",
+        my_port=my_port,
+        server_addresses=server_addresses,
+        log_level="info"
+    )
+
+    # Run as Server
+    server = Server(my_id, my_cluster, messenger, coordinator_addr)
+    print(f"Running as Server on port {my_port}...")
+    while True:
+        # Keep the server running
+        time.sleep(1)  # Sleep to avoid busy-waiting
+
+if __name__ == "__main__":
+    main()

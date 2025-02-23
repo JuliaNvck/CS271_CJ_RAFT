@@ -6,9 +6,10 @@ from udp_messenger import UDPMessenger
 from message import ClientRequest, Prepare, Vote, Commit, Abort, Ack
 
 class Client:
-    def __init__(self, messenger, server_addresses):
+    def __init__(self, messenger, server_addresses, cluster_to_servers):
         self.messenger = messenger
         self.server_addresses = server_addresses
+        self.cluster_to_servers = cluster_to_servers
         self.transaction_id = 0
         self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}}}
 
@@ -86,32 +87,34 @@ class Client:
 
         return[cluster_x, cluster_y]
         
-    def initiate_transaction(self, data):
-        """Phase 1: Send Prepare to all servers."""
-        self.transaction_id += 1
-        tx_id = self.transaction_id
-        self.pending_transactions[tx_id] = {"votes": {}, "acks": {}}
-        
-        prepare_msg = Prepare(tx_id=tx_id, data=data)
-        self.messenger.broadcast_message(prepare_msg)
 
 def main():
-    # Check for correct number of arguments
     if len(sys.argv) < 2:
         print("Usage: python3 client.py <my_port>")
         sys.exit(1)
 
-    # Load config
     with open("config.json", "r") as f:
         config = json.load(f)
     
-    # Parse command-line argument
     my_port = int(sys.argv[1])
 
     # Define server addresses
-    server_addresses = [(s["ip"], s["port"]) for s in config["servers"]]
+    server_addresses = []
+    cluster_to_servers = {}
+    
+    for server in config["servers"]:
+        addr = server["ip"]
+        port = server["port"]
+        cluster = server["cluster"]
+        server_id = server["id"]
+        
+        if port != my_port:
+            server_addresses.append((addr, port))
+        
+        if cluster not in cluster_to_servers:
+            cluster_to_servers[cluster] = []
+        cluster_to_servers[cluster].append({"id": server_id, "addr": (addr,port)})
 
-    # Initialize UDP messenger
     messenger = UDPMessenger(
         my_ip="127.0.0.1",
         my_port=my_port,
@@ -120,7 +123,7 @@ def main():
     )
 
     # Run client
-    client = Client(messenger, server_addresses)
+    client = Client(messenger, server_addresses, cluster_to_servers)
     print(f"Running as Client on port {my_port}...")
 
     # Load transactions
@@ -132,17 +135,24 @@ def main():
                 x, y, amt = parts
                 transactions.append((int(x.strip()), int(y.strip()), int(amt)))
 
-    # Process transactions
+    # Issue transactions
     time.sleep(5)
     for t in transactions:
         if client.is_intra_shard_transaction(t):
-            c = client.get_clusters(t)[0]
-            receiver = ("127.0.0.1", 5001)
-            # Issue ClientRequest to leader of correct cluster
-            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver)
+            # issue RAFT transaction
+            cluster = client.get_clusters(t)[0]
+            receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
+            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
         else:
-            # Issue 2PC transaction
-            client.initiate_transaction(t)
+            # issue 2PC transaction
+            client.transaction_id += 1
+            tx_id = client.transaction_id
+            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}}
+            
+            for cluster in client.get_clusters(t):
+                # lowest ID in each cluster
+                receiver = cluster_to_servers[cluster][0]
+                client.messenger.send_message(Prepare(tx_id=tx_id, data=t), receiver['addr'])
         time.sleep(10)
 
 if __name__ == "__main__":

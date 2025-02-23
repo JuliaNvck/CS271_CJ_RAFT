@@ -41,18 +41,8 @@ class Client:
             del self.pending_transactions[tx_id]
 
     def is_intra_shard_transaction(self, transaction):
-        """
-        Determine if a transaction is intra-shard (i.e., both accounts belong to the same cluster).
-        
-        :param transaction: A tuple (x, y, amt), where:
-            - x: The source account ID.
-            - y: The target account ID.
-            - amt: The amount to transfer.
-        :return: True if the transaction is intra-shard, False otherwise.
-        """
         x, y, _ = transaction
 
-        # Determine the cluster for account x
         if 0 <= x <= 1000:
             cluster_x = 1
         elif 1001 <= x <= 2000:
@@ -62,7 +52,6 @@ class Client:
         else:
             raise ValueError(f"Account {x} does not belong to any cluster.")
 
-        # Determine the cluster for account y
         if 0 <= y <= 1000:
             cluster_y = 1
         elif 1001 <= y <= 2000:
@@ -72,8 +61,30 @@ class Client:
         else:
             raise ValueError(f"Account {y} does not belong to any cluster.")
 
-        # Check if both accounts belong to the same cluster
         return cluster_x == cluster_y
+    
+    def get_clusters(self, transaction):
+        x, y, _ = transaction
+
+        if 0 <= x <= 1000:
+            cluster_x = 1
+        elif 1001 <= x <= 2000:
+            cluster_x = 2
+        elif 2001 <= x <= 3000:
+            cluster_x = 3
+        else:
+            raise ValueError(f"Account {x} does not belong to any cluster.")
+
+        if 0 <= y <= 1000:
+            cluster_y = 1
+        elif 1001 <= y <= 2000:
+            cluster_y = 2
+        elif 2001 <= y <= 3000:
+            cluster_y = 3
+        else:
+            raise ValueError(f"Account {y} does not belong to any cluster.")
+
+        return[cluster_x, cluster_y]
         
     def initiate_transaction(self, data):
         """Phase 1: Send Prepare to all servers."""
@@ -85,16 +96,16 @@ class Client:
         self.messenger.broadcast_message(prepare_msg)
 
 def main():
+    # Check for correct number of arguments
     if len(sys.argv) < 2:
         print("Usage: python3 client.py <my_port>")
         sys.exit(1)
 
-    # Load configuration
+    # Load config
     with open("config.json", "r") as f:
         config = json.load(f)
     
-    coordinator_config = config["coordinator"]
-    coordinator_addr = (coordinator_config["ip"], coordinator_config["port"])
+    # Parse command-line argument
     my_port = int(sys.argv[1])
 
     # Define server addresses
@@ -108,10 +119,11 @@ def main():
         log_level="info"
     )
 
-    # Run as Client (Coordinator)
+    # Run client
     client = Client(messenger, server_addresses)
-    print("Running as Client (Coordinator)...")
+    print(f"Running as Client on port {my_port}...")
 
+    # Load transactions
     transactions = []
     with open('transactions.csv', "r") as file:
         for line in file:
@@ -119,15 +131,19 @@ def main():
             if len(parts) == 3:
                 x, y, amt = parts
                 transactions.append((int(x.strip()), int(y.strip()), int(amt)))
-    
+
+    # Process transactions
+    time.sleep(5)
     for t in transactions:
         if client.is_intra_shard_transaction(t):
-            # issue ClientRequest to leader of correct cluster
-            pass
+            c = client.get_clusters(t)[0]
+            receiver = ("127.0.0.1", 5001)
+            # Issue ClientRequest to leader of correct cluster
+            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver)
         else:
-            # issue 2pc transaction
+            # Issue 2PC transaction
             client.initiate_transaction(t)
-        time.sleep(5)
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()

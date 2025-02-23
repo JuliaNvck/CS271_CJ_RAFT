@@ -47,8 +47,8 @@ class UDPMessenger:
                 message = Message.from_dict(message_dict)
 
                 # Log the received message
-                self.logger.info(f"[RX] {addr[1]} {message.msg_type}")
-                self.logger.debug(f"[RX] {addr[1]} {message_dict}")
+                self.logger.info(f"[R] {addr[1]} {message.msg_type}")
+                self.logger.debug(f"[R] {addr[1]} {message_dict}")
 
                 # Pass the message to the handler (if provided)
                 if self.message_handler:
@@ -64,7 +64,7 @@ class UDPMessenger:
         for server in self.server_addresses:
             try:
                 self.socket.sendto(serialized_message, server)
-                self.logger.info(f"[TX] {server[1]} {message.msg_type}")
+                self.logger.info(f"[T] {server[1]} {message.msg_type}")
                 self.logger.debug(f"Broadcasted message to {server}: {message.to_dict()}")
             except Exception as e:
                 self.logger.error(f"Error broadcasting to {server}: {e}")
@@ -76,8 +76,8 @@ class UDPMessenger:
         serialized_message = json.dumps(message.to_dict()).encode('utf-8')
         try:
             self.socket.sendto(serialized_message, receiver)
-            self.logger.info(f"[TX] {receiver[1]} {message.msg_type}")
-            self.logger.debug(f"[TX] {receiver[1]} {message.to_dict()}")
+            self.logger.info(f"[T] {receiver[1]} {message.msg_type}")
+            self.logger.debug(f"[T] {receiver[1]} {message.to_dict()}")
         except Exception as e:
             self.logger.error(f"Error sending message to {receiver}: {e}")
 

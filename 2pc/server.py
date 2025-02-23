@@ -3,9 +3,8 @@ import sys
 import json
 import time
 from udp_messenger import UDPMessenger
-from message import ClientRequest
 from shard_manager import ShardManager
-from message import Message, Prepare, Vote, Commit, Abort, Ack
+from message import Vote, Ack
 
 class Server:
     def __init__(self, id, cluster, messenger, coordinator_addr):
@@ -59,21 +58,21 @@ class Server:
         return True  # Replace with your logic
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 server.py <my_port>")
+    # Check for correct number of arguments
+    if len(sys.argv) < 4:
+        print("Usage: python3 server.py <my_port> <my_id> <my_cluster>")
         sys.exit(1)
 
-    # Load configuration
+    # Load config
     with open("config.json", "r") as f:
         config = json.load(f)
     
-    coordinator_config = config["coordinator"]
-    coordinator_addr = (coordinator_config["ip"], coordinator_config["port"])
+    coordinator_addr = (config["coordinator"]["ip"], config["coordinator"]["port"])
+
+    # Parse command-line arguments
     my_port = int(sys.argv[1])
-    for s in config["servers"]:
-        if s["port"] == my_port:
-            my_id = s["id"]
-            my_cluster = s["cluster"]
+    my_id = int(sys.argv[2])
+    my_cluster = int(sys.argv[3])
 
     # Define server addresses (exclude current port)
     server_addresses = [(s["ip"], s["port"]) for s in config["servers"] if s["port"] != my_port]
@@ -86,9 +85,9 @@ def main():
         log_level="info"
     )
 
-    # Run as Server
+    # Run server
     server = Server(my_id, my_cluster, messenger, coordinator_addr)
-    print(f"Running as Server on port {my_port}...")
+    print(f"Running as Server on port {my_port}, ID {my_id}, Cluster {my_cluster}...")
     while True:
         # Keep the server running
         time.sleep(1)  # Sleep to avoid busy-waiting

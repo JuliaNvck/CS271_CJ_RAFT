@@ -39,7 +39,7 @@ for cluster in "${!clusters[@]}"; do
             # Open a new Terminal window for the first server in the cluster
             osascript <<EOF
 tell application "Terminal"
-    do script "cd '$current_dir' && python3 server.py $port"
+    do script "cd '$current_dir' && python3 server.py $port $id $cluster"
 end tell
 EOF
             first_server=0
@@ -49,7 +49,7 @@ EOF
 tell application "Terminal"
     activate
     tell application "System Events" to tell process "Terminal" to keystroke "t" using command down
-    do script "cd '$current_dir' && python3 server.py $port" in front window
+    do script "cd '$current_dir' && python3 server.py $port $id $cluster" in front window
 end tell
 EOF
         fi

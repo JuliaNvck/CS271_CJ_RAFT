@@ -6,13 +6,26 @@ import logging
 from message import Message  # Import the Message class
 
 class UDPMessenger:
-    def __init__(self, my_ip, my_port, server_addresses, message_handler=None, log_level="info"):
+    def __init__(self, my_ip, my_port, server_config, message_handler=None, log_level="info"):
         self.my_address = (my_ip, my_port)
-        self.server_addresses = server_addresses
         self.running = True
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(self.my_address)
         self.message_handler = message_handler  # Callback for handling messages
+
+        self.cluster_to_servers = {}
+    
+        for server in server_config:
+            addr = server["ip"]
+            port = server["port"]
+            cluster = server["cluster"]
+            server_id = server["id"]
+            
+            # never message oneself by removing from data
+            if port != my_port:
+                if cluster not in self.cluster_to_servers:
+                    self.cluster_to_servers[cluster] = []
+                self.cluster_to_servers[cluster].append({"id": server_id, "addr": (addr,port)})
 
         # Configure logging
         self.logger = logging.getLogger("UDPMessenger")
@@ -56,18 +69,19 @@ class UDPMessenger:
             except socket.timeout:
                 continue
 
-    def broadcast_message(self, message):
-        """Broadcast a message to all servers."""
+    def clustercast(self, message, cluster):
+        """Send a message to all servers (except oneself) in a cluster"""
         if not isinstance(message, Message):
             raise ValueError("Message must be an instance of Message class")
         serialized_message = json.dumps(message.to_dict()).encode('utf-8')
-        for server in self.server_addresses:
+
+        for server_info in self.cluster_to_servers[cluster]:
             try:
-                self.socket.sendto(serialized_message, server)
-                self.logger.info(f"[T] {server[1]} {message.msg_type}")
-                self.logger.debug(f"Broadcasted message to {server}: {message.to_dict()}")
+                self.socket.sendto(serialized_message, server_info['addr'])
+                self.logger.info(f"[T] {server_info['id']} {message.msg_type}")
+                self.logger.debug(f"Clustercast message to {server_info['id']}: {message.to_dict()}")
             except Exception as e:
-                self.logger.error(f"Error broadcasting to {server}: {e}")
+                self.logger.error(f"Error clustercasting to {server_info['id']}: {e}")
 
     def send_message(self, message, receiver):
         """Send a message to a specific server."""

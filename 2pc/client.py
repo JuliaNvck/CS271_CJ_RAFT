@@ -6,12 +6,11 @@ from udp_messenger import UDPMessenger
 from message import ClientRequest, Prepare, Vote, Commit, Abort, Ack
 
 class Client:
-    def __init__(self, messenger, server_addresses, cluster_to_servers):
+    def __init__(self, messenger, cluster_to_servers):
         self.messenger = messenger
-        self.server_addresses = server_addresses
         self.cluster_to_servers = cluster_to_servers
         self.transaction_id = 0
-        self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}}}
+        self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}}
 
         self.messenger.message_handler = self.handle_message
 
@@ -30,16 +29,19 @@ class Client:
         self.pending_transactions[tx_id]["votes"][server_addr] = vote
         
         # Check if all votes received
-        if len(self.pending_transactions[tx_id]["votes"]) == len(self.server_addresses):
+        if len(self.pending_transactions[tx_id]["votes"]) == 2:
             all_yes = all(vote == "yes" for vote in self.pending_transactions[tx_id]["votes"].values())
             decision = Commit(tx_id=tx_id) if all_yes else Abort(tx_id=tx_id)
-            self.messenger.broadcast_message(decision)
+            c_x, c_y = self.get_clusters(self.pending_transactions[tx_id]["transaction"])
+            self.messenger.clustercast(decision, c_x)
+            self.messenger.clustercast(decision, c_y)
 
     def handle_ack(self, tx_id, server_addr):
         """Process acknowledgments after Commit/Abort."""
         self.pending_transactions[tx_id]["acks"][server_addr] = True
-        if len(self.pending_transactions[tx_id]["acks"]) == len(self.server_addresses):
-            del self.pending_transactions[tx_id]
+        # ignore for now. who cares about acks?
+        # if len(self.pending_transactions[tx_id]["acks"]) == len(self.server_addresses):
+        #     del self.pending_transactions[tx_id]
 
     def is_intra_shard_transaction(self, transaction):
         x, y, _ = transaction
@@ -85,7 +87,7 @@ class Client:
         else:
             raise ValueError(f"Account {y} does not belong to any cluster.")
 
-        return[cluster_x, cluster_y]
+        return cluster_x, cluster_y
         
 
 def main():
@@ -98,18 +100,12 @@ def main():
     
     my_port = int(sys.argv[1])
 
-    # Define server addresses
-    server_addresses = []
     cluster_to_servers = {}
-    
     for server in config["servers"]:
         addr = server["ip"]
         port = server["port"]
         cluster = server["cluster"]
         server_id = server["id"]
-        
-        if port != my_port:
-            server_addresses.append((addr, port))
         
         if cluster not in cluster_to_servers:
             cluster_to_servers[cluster] = []
@@ -118,12 +114,12 @@ def main():
     messenger = UDPMessenger(
         my_ip="127.0.0.1",
         my_port=my_port,
-        server_addresses=server_addresses,
+        server_config=config['servers'],
         log_level="info"
     )
 
     # Run client
-    client = Client(messenger, server_addresses, cluster_to_servers)
+    client = Client(messenger, cluster_to_servers)
     print(f"Running as Client on port {my_port}...")
 
     # Load transactions
@@ -147,12 +143,16 @@ def main():
             # issue 2PC transaction
             client.transaction_id += 1
             tx_id = client.transaction_id
-            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}}
-            
-            for cluster in client.get_clusters(t):
-                # lowest ID in each cluster
-                receiver = cluster_to_servers[cluster][0]
-                client.messenger.send_message(Prepare(tx_id=tx_id, data=t), receiver['addr'])
+            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
+
+            c_x, c_y = client.get_clusters(t)
+            # message someone from x
+            recv = cluster_to_servers[c_x][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+
+            # message someone from y
+            recv = cluster_to_servers[c_y][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
         time.sleep(10)
 
 if __name__ == "__main__":

@@ -98,8 +98,9 @@ class Server:
         return True  # Replace with your logic
     
     def handle_message(self, message, addr):
-        msg_type = message.msf_type
-        term = message.term
+        msg_type = message.msg_type
+        if msg_type != "CLIENT_REQUEST":
+            term = message.term
 
         if msg_type == "CLIENT_REQUEST":
             print(f"\nReceived {msg_type} from {addr}")
@@ -153,8 +154,10 @@ class Server:
         self.votes_received = 0 # reset votes
         print(f"{self.id} is now the leader for term {self.current_term}")
         # update next_index for all followers
-        for server in self.server_addresses:
-            self.next_index[server] = len(self.log)
+        # for server in self.server_addresses:
+        for server in self.servers:
+            server_addr = server["addr"]
+            self.next_index[server_addr] = len(self.log)
         # Start heartbeat thread
         threading.Thread(target=self.send_heartbeats, daemon=True).start()
 
@@ -168,16 +171,16 @@ class Server:
         self.role = "candidate"
         self.election = True
         self.current_term += 1
-        self.voted_for = self.my_address
+        self.voted_for = self.id
         self.votes_received = 1  # Vote for self
 
         # Request votes from other servers
         message = RequestVote(
             term=self.current_term, 
-            candidate_id=self.my_address, 
+            candidate_id=self.id, 
             last_log_index=len(self.log)-1, 
             last_log_term=self.log[-1].term if self.log else None
-            ).to_dict()
+            ) # .to_dict()
         self.messenger.clustercast(message, self.cluster_id)
         # self.broadcast_message(message, "REQUEST_VOTE") # FIXME: change to clustercast
 
@@ -187,7 +190,8 @@ class Server:
         while (time.time() - start_time < self.election_timeout) and self.role == "candidate" and self.election: # FIXME: need election flag??
             # time.sleep(0.1)  # Sleep to avoid busy-waiting ???
             # Become leader if majority votes received
-            if self.votes_received > len(self.server_addresses) // 2: # Majority
+            # if self.votes_received > len(self.server_addresses) // 2: # Majority
+            if self.votes_received > 1: # Majority
                 self.become_leader()
                 return  # Exit election loop
         
@@ -202,12 +206,12 @@ class Server:
         while self.role == "leader":
             message = AppendEntries(
                 term=self.current_term, 
-                leader_id=self.my_address, 
+                leader_id=self.id, 
                 prev_log_index=len(self.log)-1, 
                 prev_log_term=self.log[-1].term if self.log else None, 
                 entries=[], 
                 leader_commit=self.commit_index
-                ).to_dict()
+                ) #.to_dict()
             
             print(f"HEARTBEAT")
             #self.broadcast_message(message, "APPEND_ENTRIES")
@@ -251,7 +255,8 @@ class Server:
 
         # Update known leader on heartbeat
         if self.role == "follower":
-            self.current_leader = tuple(leader_id)
+            self.current_leader = leader_id
+            # self.current_leader = tuple(leader_id)
             # print(f"Updated current leader to {leader_id}")
 
         # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match
@@ -259,7 +264,7 @@ class Server:
         if (prev_log_index != -1) and (prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term):
             print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
             # FIXME: unlock accounts???
-            response = AppendAck(success=False).to_dict()
+            response = AppendAck(success=False) #.to_dict()
             self.messenger.send_message(response, addr)
             # self.send_message(response, addr)
             return
@@ -297,7 +302,7 @@ class Server:
                 self.apply_committed_entries()
 
         # Send ACK to leader
-        response = AppendAck(success=True).to_dict()
+        response = AppendAck(success=True) #.to_dict()
         self.messenger.send_message(response, addr)
         #self.send_message(response, addr)
 
@@ -307,7 +312,7 @@ class Server:
     def handle_vote_request(self, message, addr):
         """Handle incoming RequestVote RPC."""
         term = message.term
-        candidate_id = tuple(message.candidate_id)
+        candidate_id = message.candidate_id
         last_log_index = message.last_log_index
         last_log_term = message.last_log_term
         
@@ -336,7 +341,7 @@ class Server:
 
         # Grant vote
         self.voted_for = candidate_id
-        response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
+        response = VoteResponse(term=self.current_term, vote_granted=True)# .to_dict()
         self.messenger.send_message(response, addr)
         # self.send_message(response, addr)
         print(f"Voted for {candidate_id} in term {term}")
@@ -344,17 +349,17 @@ class Server:
     def enqueue_transaction(self, message, addr):
         """Adds a transaction request to the queue."""
         self.transaction_queue.put((message, addr))  # Add transaction to queue
-        print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
+        print(f"[{self.id}] Successfully added transaction to queue: {message}")
 
     def process_transaction_queue(self):
         """Continuously processes transactions from the queue."""
         while True:
             try:
                 message, addr = self.transaction_queue.get()  # get next transaction and dequeue
-                print(f"[{self.my_address}] Processing transaction from queue: {message}")
+                print(f"[{self.id}] Processing transaction from queue: {message}")
                 self.process_transaction(message, addr)  # Process transaction normally
             except Exception as e:
-                print(f"[{self.my_address}] Error in transaction queue processing: {e}")
+                print(f"[{self.id}] Error in transaction queue processing: {e}")
             finally:
                 self.transaction_queue.task_done()
 
@@ -367,10 +372,12 @@ class Server:
         else:
             # Forward request to leader
             if self.current_leader:
+                current_leader_addr = self.servers[self.current_leader]["addr"]
                 print(f"Redirecting client request to leader at {self.current_leader}")
-                self.messenger.send_message(message, self.current_leader)
+                self.messenger.send_message(message, current_leader_addr)
                 # self.send_message(message, self.current_leader)
             else:
+                self.start_election()
                 print("Error: No known leader to forward request.")
 
     def process_transaction(self, message, addr):
@@ -403,7 +410,7 @@ class Server:
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
         new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
         self.log.append(new_log_entry)  # Append to leader log
-        print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
+        print(f"Leader {self.id} appended new log entry: {transaction.__dict__}")
 
         # Send AppendEntries to all followers
         self.replicate_log()
@@ -411,8 +418,10 @@ class Server:
 
     def replicate_log(self):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
-        for server in self.server_addresses:
-            self.send_append_entries(server)
+        # for server in self.server_addresses:
+        for server in self.servers:
+            server_addr = server["addr"]
+            self.send_append_entries(server_addr)
 
         # Wait for acknowledgments and retry if log inconsistency is detected
         start_time = time.time()
@@ -422,7 +431,8 @@ class Server:
         while (time.time() - start_time < 7) and self.replicate:  # Wait 3 seconds for responses
             # If a majority has replicated, update commit index
             # wait???
-            if self.acks_received > len(self.server_addresses) // 2:
+            # if self.acks_received > len(self.server_addresses) // 2:
+            if self.acks_received > 1:
                 print(f"Majority reached with {self.acks_received} ACKs")
                 self.update_commit_index()
                 return
@@ -439,16 +449,16 @@ class Server:
         entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
         message = AppendEntries(
             term=self.current_term,
-            leader_id=self.my_address,
+            leader_id=self.id,
             prev_log_index=prev_log_index,
             prev_log_term=prev_log_term,
             entries=entries,
             leader_commit=self.commit_index
-        ).to_dict()
+        ) #.to_dict()
 
         self.messenger.send_message(message, addr)
         # self.send_message(message, addr)
-        print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
+        print(f"Leader {self.id} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
 
     def update_commit_index(self):
         """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
@@ -457,16 +467,17 @@ class Server:
             match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
 
             # If a majority of servers have this entry and it's from the current term, commit it
-            if match_count > (len(self.server_addresses) - 1) // 2 and self.log[index].term == self.current_term:
+            # if match_count > (len(self.server_addresses) - 1) // 2 and self.log[index].term == self.current_term:
+            if match_count > 0 and self.log[index].term == self.current_term:
                 self.commit_index = index
-                print(f"{self.my_address} updated commit index to {self.commit_index}")
+                print(f"{self.id} updated commit index to {self.commit_index}")
                 self.apply_committed_entries()
-                print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
+                print(f"Leader {self.id} committed log entries up to index {self.commit_index}")
                 return
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
-        print(f"{self.my_address} committing entries up to index {self.commit_index}")
+        print(f"{self.id} committing entries up to index {self.commit_index}")
         try:
             # Apply transactions from the log that have not been applied to state machine yet
             for i in range(self.last_applied + 1, self.commit_index + 1):
@@ -479,7 +490,7 @@ class Server:
                 self.data_store.setdefault(receiver, 0)
                 self.data_store[sender] -= amount
                 self.data_store[receiver] += amount
-                print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+                print(f"{self.id} executed transaction: {sender} sent ${amount} to {receiver}")
 
                 # Leader notifies client
                 if self.role == "leader" and self.coordinator_addr:
@@ -494,7 +505,7 @@ class Server:
 
             self.last_applied = self.commit_index  # Update last applied index
 
-            print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
+            print(f"{self.id} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
 
         finally:
             print(f"Releasing locks for {sender} and {receiver}")
@@ -504,13 +515,13 @@ class Server:
     def send_client_response(self, response, receiver):
         # Send response to client
         self.messenger.send_message(response, receiver)
-        print(f"Leader {self.my_address} sent response to client: {response}")
+        print(f"Leader {self.id} sent response to client: {response}")
 
     def run(self):
         # Start listening thread
         # threading.Thread(target=self.listen, daemon=True).start()
-        threading.Thread(target=self.process_transaction_queue, daemon=True).start()
         threading.Thread(target=self.check_needs_election, daemon=True).start()
+        threading.Thread(target=self.process_transaction_queue, daemon=True).start()
 
         while self.running:
             time.sleep(1)

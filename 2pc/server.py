@@ -43,6 +43,7 @@ class Server:
         self.running = True  # flag to control running state of listener thread
         self.shard_start = (cluster_id - 1) * 1000 + 1
         self.shard_end = cluster_id * 1000
+        self.servers = self.messenger.cluster_to_servers[cluster_id] # {"id": server_id, "addr": (addr,port)}
 
         # RAFT variables
         self.current_term = 0
@@ -56,22 +57,11 @@ class Server:
         self.role = "follower"  # Initial state is follower
         self.election_timeout = random.uniform(*ELECTION_TIMEOUT_RANGE)  # Randomized timeout for leader election
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
+        self.election = False  # Flag to indicate if an election is in progress
+        self.votes_received = 0  # Count of votes received during an election
+        self.acks_received = 0  # Count of ACKs received during log replication
+        self.replicate = False # Flag to indicate if log replication is in progress
 
-    def handle_message(self, message, addr):
-        # if election and self.role == 'candidate':
-        #     if message.get("term", 0) > self.current_term:
-        #         self.step_down_to_follower(message.get("term"))
-        #         election = False
-        #     if message.get("msg_type") == "APPEND_ENTRIES" and message.get("term", 0) >= self.current_term:
-        #             print(f"Received AppendEntries RPC from {message.get('leader_id')}, stepping down to follower.")
-        #             self.step_down_to_follower(message.get("term"))
-        #             self.last_heartbeat = time.time()  # Reset election timeout
-        #             election = False  # Stop election process
-
-        if message.msg_type == "PREPARE":
-            self.handle_prepare(message.tx_id, message.data)
-        elif message.msg_type in ("COMMIT", "ABORT"):
-            self.handle_decision(message.tx_id, message.msg_type)
 
     def handle_prepare(self, tx_id, data):
         """Vote Yes/No during Phase 1."""
@@ -107,30 +97,79 @@ class Server:
         # Example: Check if transaction is feasible
         return True  # Replace with your logic
     
+    def handle_message(self, message, addr):
+        msg_type = message.msf_type
+        term = message.term
 
+        if msg_type == "CLIENT_REQUEST":
+            print(f"\nReceived {msg_type} from {addr}")
+        elif msg_type != "CLIENT_RESPONSE":
+            print(f"\nReceived {msg_type} from {addr[1] % 1000}") # gets server id from port
+
+        if self.election and self.role == "candidate":
+            if term > self.current_term:
+                self.step_down_to_follower(term)
+            elif msg_type == "VOTE_RESPONSE" and term == self.current_term:
+                    self.votes_received += 1
+        
+        if msg_type == "APPEND_ENTRIES":
+            # AppendEntries RPC received from new leader: step down
+            if term >= self.current_term and self.role == "candidate" and self.election:
+                print(f"Received AppendEntries RPC from {message.leader_id}, stepping down to follower.")
+                self.step_down_to_follower(term)
+                self.last_heartbeat = time.time()  # Reset election timeout
+            self.handle_append_entries(message, addr)
+        elif msg_type == "REQUEST_VOTE":
+            self.handle_vote_request(message, addr)
+        elif msg_type == "CLIENT_REQUEST":
+            self.handle_client_request(message, addr)  # Process client request
+        elif msg_type == "APPEND_ACK":
+            if message.success:
+                print(f"Received ACK from {addr}")
+                self.acks_received += 1
+                self.next_index[addr] = len(self.log)  # Move next_index forward
+                self.match_index[addr] = self.next_index[addr] - 1
+                print(f"Match index for {addr}: {self.match_index[addr]}")
+                print(f"Next index for {addr}: {self.next_index[addr]}")
+            else:
+                print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
+                self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
+                self.replicate_log(addr)
+                self.replicate = False
+        
 
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
         self.role = "follower"
         self.current_term = new_term
         self.voted_for = None
+        self.election = False
+        self.votes_received = 0
 
     def become_leader(self):
         """Transition to leader and start sending heartbeats."""
         self.role = "leader"
-        print(f"{SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+        self.election = False
+        self.votes_received = 0 # reset votes
+        print(f"{self.id} is now the leader for term {self.current_term}")
         # update next_index for all followers
         for server in self.server_addresses:
             self.next_index[server] = len(self.log)
         # Start heartbeat thread
         threading.Thread(target=self.send_heartbeats, daemon=True).start()
 
+    def check_needs_election(self):
+        """Check if election is needed based on heartbeat timeout."""
+        if self.role == "follower" and time.time() - self.last_heartbeat > self.election_timeout:
+            self.start_election()
+
     def start_election(self):
         # Start a new election
         self.role = "candidate"
+        self.election = True
         self.current_term += 1
         self.voted_for = self.my_address
-        votes_received = 1  # Vote for self
+        self.votes_received = 1  # Vote for self
 
         # Request votes from other servers
         message = RequestVote(
@@ -139,42 +178,22 @@ class Server:
             last_log_index=len(self.log)-1, 
             last_log_term=self.log[-1].term if self.log else None
             ).to_dict()
-        self.broadcast_message(message, "REQUEST_VOTE") # FIXME: change to clustercast
+        self.messenger.clustercast(message, self.cluster_id)
+        # self.broadcast_message(message, "REQUEST_VOTE") # FIXME: change to clustercast
+
 
         # Wait for votes
         start_time = time.time()
-        while time.time() - start_time < self.election_timeout:
-            try:
-                data, addr = self.socket.recvfrom(4096)
-                response = json.loads(data.decode('utf-8'))
-
-                # Step down if a higher term message is received
-                if response.get("term", 0) > self.current_term:
-                    # print(f"Received higher term {response.get('term')}, stepping down to follower.")
-                    self.step_down_to_follower(response.get("term"))
-                    return  # Stop election process
-                
-                # AppendEntries RPC received from new leader: step down
-                if response.get("msg_type") == "APPEND_ENTRIES" and response.get("term", 0) >= self.current_term:
-                    print(f"Received AppendEntries RPC from {response.get('leader_id')}, stepping down to follower.")
-                    self.step_down_to_follower(response.get("term"))
-                    self.last_heartbeat = time.time()  # Reset election timeout
-                    return  # Stop election process
-                
-                # Count votes
-                if response.get("msg_type") == "VOTE_RESPONSE" and response.get("term") == self.current_term:
-                    votes_received += 1
-                
-                # Become leader if majority votes received
-                if votes_received > len(self.server_addresses) // 2: # Majority
-                    self.become_leader()
-                    return  # Exit election loop
-                
-            except socket.timeout:
-                break
+        while (time.time() - start_time < self.election_timeout) and self.role == "candidate" and self.election: # FIXME: need election flag??
+            # time.sleep(0.1)  # Sleep to avoid busy-waiting ???
+            # Become leader if majority votes received
+            if self.votes_received > len(self.server_addresses) // 2: # Majority
+                self.become_leader()
+                return  # Exit election loop
         
         # if no outcome, restart election
         if self.role == "candidate":
+            election = False # ??
             time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
             self.start_election()
                 
@@ -191,7 +210,8 @@ class Server:
                 ).to_dict()
             
             print(f"HEARTBEAT")
-            self.broadcast_message(message, "APPEND_ENTRIES")
+            #self.broadcast_message(message, "APPEND_ENTRIES")
+            self.messenger.clustercast(message, self.cluster_id)
             time.sleep(HEARTBEAT_INTERVAL) # heartbeat interval
             
             # If a higher term is received, leader should step down
@@ -201,12 +221,12 @@ class Server:
 
     def handle_append_entries(self, message, addr):
         """Handle incoming AppendEntries RPC: heartbeats & log replication."""
-        term = message.get("term")
-        leader_id = message.get("leader_id")
-        prev_log_index = message.get("prev_log_index")
-        prev_log_term = message.get("prev_log_term")
-        entries = message.get("entries", [])
-        leader_commit = message.get("leader_commit", -1)
+        term = message.term
+        leader_id = message.leader_id
+        prev_log_index = message.prev_log_index
+        prev_log_term = message.prev_log_term
+        entries = message.entries
+        leader_commit = getattr(message, "leader_commit", -1) # message.get("leader_commit", -1)
 
         if len(entries) == 0:
             print(f"HEARTBEAT from {leader_id} for term {term}")
@@ -240,7 +260,8 @@ class Server:
             print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
             # FIXME: unlock accounts???
             response = AppendAck(success=False).to_dict()
-            self.send_message(response, addr)
+            self.messenger.send_message(response, addr)
+            # self.send_message(response, addr)
             return
         
         # If existing entries conflict with new entries, delete all existing entries starting with first conflicting entry
@@ -277,17 +298,18 @@ class Server:
 
         # Send ACK to leader
         response = AppendAck(success=True).to_dict()
-        self.send_message(response, addr)
+        self.messenger.send_message(response, addr)
+        #self.send_message(response, addr)
 
         print(f"commit index: {self.commit_index}")
 
                 
     def handle_vote_request(self, message, addr):
         """Handle incoming RequestVote RPC."""
-        term = message.get("term")
-        candidate_id = tuple(message.get("candidate_id"))
-        last_log_index = message.get("last_log_index")
-        last_log_term = message.get("last_log_term")
+        term = message.term
+        candidate_id = tuple(message.candidate_id)
+        last_log_index = message.last_log_index
+        last_log_term = message.last_log_term
         
         if last_log_index is None:
             last_log_index = -1
@@ -315,7 +337,8 @@ class Server:
         # Grant vote
         self.voted_for = candidate_id
         response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
-        self.send_message(response, addr)
+        self.messenger.send_message(response, addr)
+        # self.send_message(response, addr)
         print(f"Voted for {candidate_id} in term {term}")
 
     def enqueue_transaction(self, message, addr):
@@ -345,16 +368,17 @@ class Server:
             # Forward request to leader
             if self.current_leader:
                 print(f"Redirecting client request to leader at {self.current_leader}")
-                self.send_message(message, self.current_leader)
+                self.messenger.send_message(message, self.current_leader)
+                # self.send_message(message, self.current_leader)
             else:
                 print("Error: No known leader to forward request.")
 
     def process_transaction(self, message, addr):
         """Processes a single transaction request."""
         """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
-        sender = int(message.get("sender"))
-        receiver = int(message.get("receiver"))
-        amount = int(message.get("amount"))
+        sender = int(message.sender)
+        receiver = int(message.receiver)
+        amount = int(message.amount)
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
         # Check if sender has sufficient balance
@@ -388,40 +412,20 @@ class Server:
     def replicate_log(self):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
         for server in self.server_addresses:
-            self.send_append_entries(server) #FIXME: clustercast
+            self.send_append_entries(server)
 
         # Wait for acknowledgments and retry if log inconsistency is detected
         start_time = time.time()
-        acks_received = 1  # Leader counts itself
+        self.acks_received = 1  # Leader counts itself
+        self.replicate = True
 
-        while time.time() - start_time < 7:  # Wait 3 seconds for responses
-            try:
-                data, addr = self.socket.recvfrom(4096)
-                response = json.loads(data.decode('utf-8'))
-                print(f"Received message from {addr}: {response}")
-
-                if response.get("msg_type") == "APPEND_ACK":
-                    if response.get("success"):
-                        print(f"Received ACK from {addr}")
-                        acks_received += 1
-                        self.next_index[addr] = len(self.log)  # Move next_index forward
-                        self.match_index[addr] = self.next_index[addr] - 1
-                        print(f"Match index for {addr}: {self.match_index[addr]}")
-                        print(f"Next index for {addr}: {self.next_index[addr]}")
-
-                        # If a majority has replicated, update commit index
-                        if acks_received > len(self.server_addresses) // 2:
-                            print(f"Majority reached with {acks_received} ACKs")
-                            self.update_commit_index()
-                            return
-                    else:
-                        print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
-                        self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
-                        self.replicate_log(addr)
-                        return
-
-            except socket.timeout:
-                break  # Timeout, no majority reached
+        while (time.time() - start_time < 7) and self.replicate:  # Wait 3 seconds for responses
+            # If a majority has replicated, update commit index
+            # wait???
+            if self.acks_received > len(self.server_addresses) // 2:
+                print(f"Majority reached with {self.acks_received} ACKs")
+                self.update_commit_index()
+                return
 
     def send_append_entries(self, addr):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
@@ -442,7 +446,8 @@ class Server:
             leader_commit=self.commit_index
         ).to_dict()
 
-        self.send_message(message, addr)
+        self.messenger.send_message(message, addr)
+        # self.send_message(message, addr)
         print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
 
     def update_commit_index(self):
@@ -477,10 +482,10 @@ class Server:
                 print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
                 # Leader notifies client
-                if self.role == "leader" and CLIENT_ADDR:
+                if self.role == "leader" and self.coordinator_addr:
                     response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
                     # Send cleint response
-                    self.send_client_response(vars(response), CLIENT_ADDR)
+                    self.send_client_response(vars(response), self.coordinator_addr)
                 
             # Unlock sender and receiver
             self.locks[sender] = False
@@ -498,52 +503,14 @@ class Server:
 
     def send_client_response(self, response, receiver):
         # Send response to client
-        # serialize message
-        serialized_message = json.dumps(response).encode('utf-8') 
-        try:
-            self.socket.sendto(serialized_message, receiver)  # send the message via UDP
-            print(f"Leader {self.my_address} sent response to client: {response}")
-        except Exception as e:
-            print(f"Error sending message to {receiver}: {e}")
-
-    def listen(self):
-        # Listen for incoming UDP messages
-        print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
-        while self.running:
-            try:
-                # set timeout to periodically check running flag
-                self.socket.settimeout(1)
-                data, addr = self.socket.recvfrom(2048) # receive message
-                message_data = json.loads(data.decode('utf-8')) # decode message
-
-                msg_type = message_data.get("msg_type")
-                # Ignore messages that are meant for clients
-                if msg_type == "CLIENT_RESPONSE":
-                    continue  # Skip processing
-                if msg_type == "CLIENT_REQUEST":
-                    print(f"\nReceived {msg_type} from {addr}")
-                else:
-                    print(f"\nReceived {msg_type} from {SERVER_NAMES[addr]}")
-
-                if msg_type == "APPEND_ENTRIES":
-                    self.handle_append_entries(message_data, addr)
-                elif msg_type == "REQUEST_VOTE":
-                    self.handle_vote_request(message_data, addr)
-                elif msg_type == "CLIENT_REQUEST":
-                    self.handle_client_request(message_data, addr)  # Process client request
-
-            except socket.timeout:
-                # If no leader heartbeat is received, start an election
-                if self.role == "follower" and time.time() - self.last_heartbeat > self.election_timeout:
-                    self.start_election()
-            except Exception as e:
-                print(f"Error receiving data: {e}")
-                break
+        self.messenger.send_message(response, receiver)
+        print(f"Leader {self.my_address} sent response to client: {response}")
 
     def run(self):
         # Start listening thread
-        threading.Thread(target=self.listen, daemon=True).start()
+        # threading.Thread(target=self.listen, daemon=True).start()
         threading.Thread(target=self.process_transaction_queue, daemon=True).start()
+        threading.Thread(target=self.check_needs_election, daemon=True).start()
 
         while self.running:
             time.sleep(1)
@@ -577,8 +544,9 @@ def main():
     server = Server(my_id, my_cluster, messenger, coordinator_addr)
     print(f"Running as Server on port {my_port}, ID {my_id}, Cluster {my_cluster}...")
     while True:
-        # Keep the server running
-        time.sleep(1)  # Sleep to avoid busy-waiting
+        server.run()
+        # # Keep the server running
+        # time.sleep(1)  # Sleep to avoid busy-waiting
 
 if __name__ == "__main__":
     main()

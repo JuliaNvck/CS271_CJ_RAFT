@@ -73,6 +73,20 @@ class Server:
         # Tracks which accounts are locked
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
 
+    
+    # 2PC handlers
+    def handle_prepare(self, tx_id, data):
+        """Vote Yes/No during Phase 1."""
+        # add is_2pc_transaction flag to data -- when get prepare add is_2pc_transaction = true to data
+        # if is 2pc transaction then abort when locks are being used
+        # is suff balance and no locks send vote = yes
+        # replicate log and get majority 
+        # receive client decision: commit: commit and execute transaction, each server releases its locks,  the server sends an Ack message back to the coordinating client
+        # abort or if the transaction coordinator times out: don't commit/execute, each server releases its locks,  the server sends an Ack message back to the coordinating client
+        
+
+    # RAFT handlers
+    
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
         self.role = "follower"
@@ -319,10 +333,11 @@ class Server:
         amount = int(message.get("amount"))
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
-        # Check if sender has sufficient balance
+        # Check if sender has sufficient balance # FIXME: change to _can_commit
         if self.shardManager.get_balance(sender) < amount:
             print(f"Transaction rejected: {sender} has insufficient balance.")
             return
+    
         
         # Wait until both accounts are unlocked
         start_time = time.time()

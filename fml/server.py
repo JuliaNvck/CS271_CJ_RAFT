@@ -134,7 +134,7 @@ class Server:
                     votes_received += 1
                 
                 # Become leader if majority votes received
-                if votes_received >= 2: # Majority
+                if votes_received > 1: # Majority
                     self.become_leader()
                     return  # Exit election loop
                 
@@ -373,7 +373,7 @@ class Server:
                         print(f"Next index for {addr}: {self.next_index[addr]}")
 
                         # If a majority has replicated, update commit index
-                        if acks_received >= 2:
+                        if acks_received > 1:
                             print(f"Majority reached with {acks_received} ACKs")
                             self.update_commit_index()
                             return
@@ -393,7 +393,7 @@ class Server:
             match_count = sum(1 for addr in self.match_index if self.match_index[addr] >= index)
 
             # If a majority of servers have this entry and it's from the current term, commit it
-            if match_count >= 2 and self.log[index].term == self.current_term:
+            if match_count > 0 and self.log[index].term == self.current_term:
                 self.commit_index = index
                 print(f"{self.my_address} updated commit index to {self.commit_index}")
                 self.apply_committed_entries()
@@ -420,7 +420,7 @@ class Server:
                 # Leader notifies client
                 if self.role == "leader" and self.coordinator_addr:
                     response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
-                    self.send_message(response, self.coordinator_addr)
+                    self.send_message(vars(response), self.coordinator_addr)
                 
             # Unlock sender and receiver
             self.locks[sender] = False

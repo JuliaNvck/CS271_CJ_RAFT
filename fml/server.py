@@ -320,7 +320,7 @@ class Server:
         print(f"Received client request: {sender} sends ${amount} to {receiver}")
         
         # Check if sender has sufficient balance
-        if self.data_store[sender] < amount:
+        if self.shardManager.get_balance(sender) < amount:
             print(f"Transaction rejected: {sender} has insufficient balance.")
             return
         
@@ -407,12 +407,14 @@ class Server:
                 transaction = self.log[i].transaction # Get transaction from log
                 print(f"Applying transaction: {transaction}")
                 sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
+                # disk write
+                self.shardManager.execute_transaction((sender, receiver, amount))
 
                 # Update balances in data store
-                self.data_store.setdefault(sender, 0)
-                self.data_store.setdefault(receiver, 0)
-                self.data_store[sender] -= amount
-                self.data_store[receiver] += amount
+                # self.data_store.setdefault(sender, 0)
+                # self.data_store.setdefault(receiver, 0)
+                # self.data_store[sender] -= amount
+                # self.data_store[receiver] += amount
                 print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
                 # Leader notifies client
@@ -427,7 +429,7 @@ class Server:
 
             self.last_applied = self.commit_index  # Update last applied index
 
-            print(f"{self.my_address} Account Balances: sender {sender}: {self.data_store[sender]}, receiver {receiver}: {self.data_store[receiver]}")
+            print(f"{self.my_address} Account Balances: sender {sender}: {self.shardManager.get_balance(sender)}, receiver {receiver}: {self.shardManager.get_balance(receiver)}")
 
         finally:
             print(f"Releasing locks for {sender} and {receiver}")

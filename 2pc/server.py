@@ -165,6 +165,11 @@ class Server:
         """Check if election is needed based on heartbeat timeout."""
         if self.role == "follower" and time.time() - self.last_heartbeat > self.election_timeout:
             self.start_election()
+        # if no outcome, restart election
+        if self.role == "candidate":
+            election = False # ??
+            time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
+            self.start_election()
 
     def start_election(self):
         # Start a new election
@@ -196,10 +201,10 @@ class Server:
                 return  # Exit election loop
         
         # if no outcome, restart election
-        if self.role == "candidate":
-            election = False # ??
-            time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
-            self.start_election()
+        # if self.role == "candidate":
+        #     election = False # ??
+        #     time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
+        #     self.start_election()
                 
     def send_heartbeats(self):
         """Send periodic heartbeats (empty AppendEntries RPC) to maintain authority."""

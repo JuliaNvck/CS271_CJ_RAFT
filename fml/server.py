@@ -8,6 +8,7 @@ import random
 import queue
 from messages import *
 from messages import Message
+from shard_manager import ShardManager
 
 HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (3, 6) # seconds
@@ -57,6 +58,7 @@ class Server:
         self.running = True  # flag to control running state of listener thread
         self.shard_start = (my_cluster - 1) * 1000 + 1
         self.shard_end = my_cluster * 1000
+        self.shardManager = ShardManager(self.SERVER_NAMES[(self.my_address)], self.my_cluster)
 
         # RAFT variables
         self.current_term = 0

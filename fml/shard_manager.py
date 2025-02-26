@@ -136,6 +136,6 @@ if __name__ == "__main__":
     shard_manager.update_balance(50, 20)
     print("Updated balance for account 50.")
 
-    # Execute a transaction (50, 100, 5)
+    # Execute a transaction (x, y, amt)
     shard_manager.execute_transaction((50, 100, 5))
     print("Executed transaction (50, 100, 5).")

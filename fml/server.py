@@ -115,6 +115,7 @@ class Server:
             try:
                 data, addr = self.socket.recvfrom(4096)
                 response = json.loads(data.decode('utf-8'))
+                print(f"Received message type {response.get('msg_type')} from {addr}")
 
                 # Step down if a higher term message is received
                 if response.get("term", 0) > self.current_term:

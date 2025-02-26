@@ -9,17 +9,12 @@ import queue
 from messages import *
 from messages import Message
 from shard_manager import ShardManager
+from log_entry import LogEntry
 
 HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (3, 6) # seconds
 TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
 SHARD_SIZE = 1000
-
-class LogEntry:
-    """Class representing a log entry."""
-    def __init__(self, term, transaction):
-        self.term = term
-        self.transaction = transaction
 
 class Transaction:
     """Class representing a transaction."""

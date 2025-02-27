@@ -6,7 +6,7 @@ import json
 import time
 import random
 import queue
-from messages import *
+from .messages import *
 from messages import Message
 from shard_manager import ShardManager
 from log_entry import LogEntry
@@ -34,7 +34,7 @@ class Server:
         self.socket.bind(self.my_address)
 
         self.cluster_to_servers = {}
-        self.SERVER_NAMES = {("127.0.0.1", 5000): "client"} # hardcode the client because we like things extremely janky :)
+        self.SERVER_NAMES = {("127.0.0.1", 5000): "client"} # hardcode the client
         for server in server_config:
             addr = server["ip"]
             port = server["port"]
@@ -72,20 +72,6 @@ class Server:
         self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
         # Tracks which accounts are locked
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
-
-    
-    # 2PC handlers
-    def handle_prepare(self, tx_id, data):
-        """Vote Yes/No during Phase 1."""
-        # add is_2pc_transaction flag to data -- when get prepare add is_2pc_transaction = true to data
-        # if is 2pc transaction then abort when locks are being used
-        # is suff balance and no locks send vote = yes
-        # replicate log and get majority 
-        # receive client decision: commit: commit and execute transaction, each server releases its locks,  the server sends an Ack message back to the coordinating client
-        # abort or if the transaction coordinator times out: don't commit/execute, each server releases its locks,  the server sends an Ack message back to the coordinating client
-        
-
-    # RAFT handlers
     
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
@@ -234,6 +220,9 @@ class Server:
             print(f"sender: {sender}, receiver: {receiver}")
             print(f"entry: {entry}")
             transaction=entry["transaction"]
+            is_2PC = entry["is_2PC"]
+            tx_id = entry.get("tx_id")  # Extract tx_id safely
+            committed_2PC = entry.get("committed_2PC", False)
             # Create transaction object from dict
             if isinstance(transaction, dict):
                 transaction = Transaction(transaction["sender"], transaction["receiver"], transaction["amount"])
@@ -244,7 +233,7 @@ class Server:
             self.locks[sender] = True
             self.locks[receiver] = True
 
-            self.log.append(LogEntry(term=entry["term"], transaction=transaction))
+            self.log.append(LogEntry(term=entry["term"], transaction=transaction, is_2PC=is_2PC, tx_id=tx_id, committed_2PC=committed_2PC))
             print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
 
         # Update commit index
@@ -299,16 +288,23 @@ class Server:
 
     def enqueue_transaction(self, message, addr):
         """Adds a transaction request to the queue."""
-        self.transaction_queue.put((message, addr))  # Add transaction to queue
+        # Add transaction to queue
+        self.transaction_queue.put((message, addr, False))  # False for is_2PC transaction
         print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
 
+    def enqueue_cross_shard_transaction(self, message, addr):
+        """Enqueue cross-shard transactions for 2PC handling."""
+        # Add transaction to queue
+        self.transaction_queue.put((message, addr, True))  # True for is_2PC transaction
+        print(f"[{self.my_address}] Enqueued cross-shard transaction: {message}")
+    
     def process_transaction_queue(self):
         """Continuously processes transactions from the queue."""
         while True:
             try:
-                message, addr = self.transaction_queue.get()  # get next transaction and dequeue
+                message, addr, is_2PC = self.transaction_queue.get()  # get next transaction and dequeue
                 print(f"[{self.my_address}] Processing transaction from queue: {message}")
-                self.process_transaction(message, addr)  # Process transaction normally
+                self.process_transaction(message, addr, is_2PC)  # Process transaction normally
             finally:
                 self.transaction_queue.task_done()
     
@@ -325,23 +321,33 @@ class Server:
             else:
                 print("Error: No known leader to forward request.")
 
-    def process_transaction(self, message, addr):
+    def process_transaction(self, message, addr, is_2PC):
         """Processes a single transaction request."""
         """Handles intra-shard client request by adding a new log entry and replicating it to followers."""
         sender = int(message.get("sender"))
         receiver = int(message.get("receiver"))
         amount = int(message.get("amount"))
-        print(f"Received client request: {sender} sends ${amount} to {receiver}")
+        tx_id = message.get("tx_id")
+        print(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
         
-        # Check if sender has sufficient balance # FIXME: change to _can_commit
+        # Check if sender has sufficient balance
         if self.shardManager.get_balance(sender) < amount:
             print(f"Transaction rejected: {sender} has insufficient balance.")
+            if is_2PC:
+                # For 2PC: vote No
+                vote = Vote(tx_id=tx_id, vote = "no").to_dict()
+                self.send_message(vote, self.coordinator_addr)
             return
-    
         
         # Wait until both accounts are unlocked
         start_time = time.time()
         while self.locks[sender] or self.locks[receiver]:
+            # For 2PC: accounts are locked: abort
+            if is_2PC:
+                vote = Vote(tx_id=tx_id, vote = "no").to_dict()
+                self.send_message(vote, self.coordinator_addr)
+                return
+            
             print(f"Waiting for {sender} and {receiver} to unlock...")
             if time.time() - start_time > TRANSACTION_TIMEOUT:
                 print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
@@ -354,7 +360,7 @@ class Server:
 
         # Create log entry and execute RAFT to replicate
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
-        new_log_entry = LogEntry(term=self.current_term, transaction=transaction)
+        new_log_entry = LogEntry(term=self.current_term, transaction=transaction, is_2PC=is_2PC, tx_id=tx_id)
         self.log.append(new_log_entry)  # Append to leader log
         print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
 
@@ -393,7 +399,7 @@ class Server:
                     else:
                         print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
                         self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
-                        self.replicate_log(addr)
+                        self.replicate_log()
                         return
 
             except socket.timeout:
@@ -409,6 +415,15 @@ class Server:
             if match_count > 0 and self.log[index].term == self.current_term:
                 self.commit_index = index
                 print(f"{self.my_address} updated commit index to {self.commit_index}")
+
+                log_entry = self.log[index]
+                # If this is a 2PC transaction, send "VOTE YES" now (after replication but before execution)
+                if log_entry.is_2PC and log_entry.tx_id:
+                    vote = Vote(tx_id=log_entry.tx_id, vote="yes").to_dict()
+                    print(f"Sending VOTE YES for cross-shard transaction: {log_entry.transaction}")
+                    self.send_message(vote, self.coordinator_addr)
+                    # Don't execute yet, wait for commit/abort decision
+                    return
                 self.apply_committed_entries()
                 print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
                 return
@@ -419,7 +434,16 @@ class Server:
         try:
             # Apply transactions from the log that have not been applied to state machine yet
             for i in range(self.last_applied + 1, self.commit_index + 1):
-                transaction = self.log[i].transaction # Get transaction from log
+                log_entry = self.log[i]
+
+                # 2PC Transaction: Skip execution if not yet committed
+                if log_entry.is_2PC and not getattr(log_entry, "committed_2PC", False):
+                    print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT decision.")
+                    continue  # Wait until COMMIT message arrives
+                elif log_entry.is_2PC and log_entry.committed_2PC:
+                    print(f"Executing previously committed 2PC transaction (tx_id: {log_entry.tx_id}).")
+
+                transaction = log_entry.transaction # Get transaction from log
                 print(f"Applying transaction: {transaction}")
                 sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
                 # disk write
@@ -451,6 +475,36 @@ class Server:
             self.locks[sender] = False
             self.locks[receiver] = False
 
+    def handle_decision(self, message, addr):
+        """Handles COMMIT/ABORT decision for a cross-shard (2PC) transaction."""
+        tx_id = message.get("tx_id")
+        decision = message.get("msg_type")  # Either "COMMIT" or "ABORT"
+
+        print(f"Received {decision} decision for cross-shard transaction with tx_id: {tx_id}")
+        if not tx_id:
+            print("Error: Received COMMIT/ABORT message without tx_id. Ignoring.")
+            return
+
+        # Find the corresponding log entry
+        for log_entry in self.log:
+            if log_entry.is_2PC and log_entry.tx_id == tx_id:
+                if decision == "COMMIT":
+                    print(f"Cross-shard transaction COMMITTED: {log_entry.transaction}")
+                    log_entry.committed_2PC = True
+                    self.apply_committed_entries()  # Execute the transaction
+
+                else:  # "ABORT"
+                    print(f"Cross-shard transaction ABORTED: {log_entry.transaction}")
+                    self.locks[log_entry.transaction.sender] = False
+                    self.locks[log_entry.transaction.receiver] = False  # Unlock accounts on abort
+
+                break
+
+        # Send acknowledgment back to the client (coordinator)
+        ack_message = Ack(tx_id=tx_id).to_dict()
+        self.send_message(ack_message, addr)
+
+    
     def listen(self):
         # Listen for incoming UDP messages
         print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
@@ -462,14 +516,23 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
-                print(f"[R] {self.SERVER_NAMES[addr]} {msg_type}")
+                print(f"[R] from {self.SERVER_NAMES[addr]} {msg_type}")
 
+                # RAFT message handling
                 if msg_type == "APPEND_ENTRIES":
                     self.handle_append_entries(message_data, addr)
                 elif msg_type == "REQUEST_VOTE":
                     self.handle_vote_request(message_data, addr)
                 elif msg_type == "CLIENT_REQUEST":
                     self.handle_client_request(message_data, addr)  # Process client request
+
+                # 2PC message handling
+                elif msg_type == "PREPARE":
+                    # 2PC Prepare phase
+                    self.enqueue_cross_shard_transaction(message_data["data"], addr)
+                elif msg_type in ["COMMIT", "ABORT"]:
+                    # 2PC Commit/Abort phase (final execution decision from client)
+                    self.handle_decision(message_data, addr)
 
             except socket.timeout:
                 # If no leader heartbeat is received, start an election
@@ -480,7 +543,7 @@ class Server:
         serialized_message = json.dumps(message).encode('utf-8') 
         try:
             self.socket.sendto(serialized_message, receiver)  # send the message via UDP
-            print(f"[T] {self.SERVER_NAMES[receiver]}: {message}")
+            print(f"[T] to {self.SERVER_NAMES[receiver]}: {message}")
         except Exception as e:
             print(f"Error sending message to {self.SERVER_NAMES[receiver]}: {e}")
 
@@ -493,7 +556,14 @@ class Server:
         prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
 
         # Send all missing log entries starting from next_index
-        entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
+        # entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
+        entries = [{
+            "term": entry.term,
+            "transaction": vars(entry.transaction),
+            "is_2PC": entry.is_2PC,
+            "tx_id": entry.tx_id,
+            "committed_2PC": entry.committed_2PC
+        } for entry in self.log[self.next_index[addr]:]]
         message = AppendEntries(
             term=self.current_term,
             leader_id=self.my_address,
@@ -514,7 +584,7 @@ class Server:
         for server_info in self.cluster_to_servers[self.my_cluster]:
             try:
                 self.socket.sendto(serialized_message, server_info['addr'])
-                print(f"[T] {server_info['id']} {message.get('msg_type')}")
+                print(f"[T] to {server_info['id']} {message.get('msg_type')}")
             except Exception as e:
                 print(f"Error clustercasting to {server_info['id']}: {e}")
     

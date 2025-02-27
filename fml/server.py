@@ -6,7 +6,7 @@ import json
 import time
 import random
 import queue
-from .messages import *
+from messages import *
 from messages import Message
 from shard_manager import ShardManager
 from log_entry import LogEntry

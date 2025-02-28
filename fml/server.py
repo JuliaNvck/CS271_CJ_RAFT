@@ -339,24 +339,42 @@ class Server:
                 self.send_message(vote, self.coordinator_addr)
             return
         
-        # Wait until both accounts are unlocked
-        start_time = time.time()
-        while self.locks[sender] or self.locks[receiver]:
-            # For 2PC: accounts are locked: abort
-            if is_2PC:
-                vote = Vote(tx_id=tx_id, vote = "no").to_dict()
-                self.send_message(vote, self.coordinator_addr)
-                return
-            
-            print(f"Waiting for {sender} and {receiver} to unlock...")
-            if time.time() - start_time > TRANSACTION_TIMEOUT:
-                print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
-                return  # Abort the transaction
-            time.sleep(0.1)  # Short delay
+        if is_2PC:
+            if self.shardManager.is_account_in_cluster(sender):
+                # sender shard
+                if self.locks[sender]:
+                    # account locked: abort
+                    vote = Vote(tx_id=tx_id, vote = "no").to_dict()
+                    self.send_message(vote, self.coordinator_addr)
+                    return
+            elif self.shardManager.is_account_in_cluster(receiver):
+                # receiver shard
+                if self.locks[receiver]:
+                    # account locked: abort
+                    vote = Vote(tx_id=tx_id, vote = "no").to_dict()
+                    self.send_message(vote, self.coordinator_addr)
+                    return
+        if not is_2PC:
+            # Wait until both accounts are unlocked
+            start_time = time.time()
+            while self.locks[sender] or self.locks[receiver]:
+                print(f"Waiting for {sender} and {receiver} to unlock...")
+                if time.time() - start_time > TRANSACTION_TIMEOUT:
+                    print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
+                    return  # Abort the transaction
+                time.sleep(0.1)  # Short delay
         
         # Conditions met: lock both sender and receiver
-        self.locks[sender] = True
-        self.locks[receiver] = True
+        if not is_2PC:
+            self.locks[sender] = True
+            self.locks[receiver] = True
+        else:
+            if self.shardManager.is_account_in_cluster(sender):
+                # lock sender
+                self.locks[sender] = True
+            elif self.shardManager.is_account_in_cluster(receiver):
+                # lock receiver
+                self.locks[receiver] = True
 
         # Create log entry and execute RAFT to replicate
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
@@ -529,7 +547,7 @@ class Server:
                 # 2PC message handling
                 elif msg_type == "PREPARE":
                     # 2PC Prepare phase
-                    self.enqueue_cross_shard_transaction(message_data["data"], addr)
+                    self.enqueue_cross_shard_transaction(message_data, addr)
                 elif msg_type in ["COMMIT", "ABORT"]:
                     # 2PC Commit/Abort phase (final execution decision from client)
                     self.handle_decision(message_data, addr)

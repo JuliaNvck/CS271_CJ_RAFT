@@ -95,7 +95,10 @@ class Prepare(Message):
     def __init__(self, tx_id, data):
         super().__init__("PREPARE")
         self.tx_id = tx_id
-        self.data = data
+        self.sender = data[0]
+        self.receiver = data[1]
+        self.amount = data[2]
+        # self.data = data
 
 class Vote(Message):
     """Vote message for 2PC."""

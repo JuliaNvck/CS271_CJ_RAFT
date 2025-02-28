@@ -15,6 +15,8 @@ HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (3, 6) # seconds
 TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
 SHARD_SIZE = 1000
+RED  = '\033[31m'
+RESET = '\033[0m'
 
 class Transaction:
     """Class representing a transaction."""
@@ -331,7 +333,7 @@ class Server:
         print(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
         
         # Check if sender has sufficient balance
-        if self.shardManager.get_balance(sender) < amount:
+        if self.shardManager.is_account_in_cluster(sender) and self.shardManager.get_balance(sender) < amount:
             print(f"Transaction rejected: {sender} has insufficient balance.")
             if is_2PC:
                 # For 2PC: vote No
@@ -485,8 +487,9 @@ class Server:
             print(f"Unlocked sender {sender} and receiver {receiver}")
 
             self.last_applied = self.commit_index  # Update last applied index
-
-            print(f"{self.my_address} Account Balances: sender {sender}: {self.shardManager.get_balance(sender)}, receiver {receiver}: {self.shardManager.get_balance(receiver)}")
+            
+            # this breaks everything because we dont have access to both sender and recvr balances
+            # print(f"{self.my_address} Account Balances: sender {sender}: {self.shardManager.get_balance(sender)}, receiver {receiver}: {self.shardManager.get_balance(receiver)}")
 
         finally:
             print(f"Releasing locks for {sender} and {receiver}")
@@ -534,7 +537,8 @@ class Server:
                 message_data = json.loads(data.decode('utf-8')) # decode message
 
                 msg_type = message_data.get("msg_type")
-                print(f"[R] from {self.SERVER_NAMES[addr]} {msg_type}")
+                
+                print(f"{RED}[R]{RESET} {self.SERVER_NAMES[addr]} {msg_type}")
 
                 # RAFT message handling
                 if msg_type == "APPEND_ENTRIES":
@@ -561,7 +565,9 @@ class Server:
         serialized_message = json.dumps(message).encode('utf-8') 
         try:
             self.socket.sendto(serialized_message, receiver)  # send the message via UDP
-            print(f"[T] to {self.SERVER_NAMES[receiver]}: {message}")
+            #print(f"[T] {self.SERVER_NAMES[receiver]}: {json.dumps(message, indent=2)}")
+            msg_type = message.pop('msg_type', 'UNKNOWN')  # Extract 'msg_type' or default to 'UNKNOWN'
+            print(f"[T] {self.SERVER_NAMES[receiver]} {msg_type}\n{json.dumps(message, indent=2)}")
         except Exception as e:
             print(f"Error sending message to {self.SERVER_NAMES[receiver]}: {e}")
 
@@ -602,7 +608,7 @@ class Server:
         for server_info in self.cluster_to_servers[self.my_cluster]:
             try:
                 self.socket.sendto(serialized_message, server_info['addr'])
-                print(f"[T] to {server_info['id']} {message.get('msg_type')}")
+                print(f"[T] {server_info['id']} {message.get('msg_type')}")
             except Exception as e:
                 print(f"Error clustercasting to {server_info['id']}: {e}")
     

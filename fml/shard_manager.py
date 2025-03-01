@@ -174,14 +174,23 @@ class ShardManager:
         Truncate the log to keep entries up to last_index (inclusive).
         
         :param last_index: The index of the last entry to keep.
+        :return: The truncated log as a list of LogEntry objects.
         """
         log = self.get_log()
-        if last_index < 0 or last_index >= len(log):
-            return
         
-        truncated_log = log[:last_index+1]
+        # Check if last_index is valid
+        if last_index < 0 or last_index >= len(log):
+            return log  # Return the original log if last_index is invalid
+        
+        # Truncate the log in memory
+        truncated_log = log[:last_index]
+        
+        # Save the truncated log to the file
         with open(self.log_file, 'w') as file:
             json.dump([entry.to_dict() for entry in truncated_log], file, indent=2)
+        
+        # Return the truncated log
+        return truncated_log
     
     def get_last_log_entry(self):
         """

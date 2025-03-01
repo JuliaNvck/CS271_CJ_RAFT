@@ -10,6 +10,7 @@ from messages import *
 from messages import Message
 from shard_manager import ShardManager
 from log_entry import LogEntry
+from transaction import Transaction
 
 HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (3, 6) # seconds
@@ -17,13 +18,6 @@ TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
 SHARD_SIZE = 1000
 RED  = '\033[31m'
 RESET = '\033[0m'
-
-class Transaction:
-    """Class representing a transaction."""
-    def __init__(self, sender, receiver, amount):
-        self.sender = sender
-        self.receiver = receiver
-        self.amount = amount
 
 class Server:
     def __init__(self, my_ip, my_port, my_cluster, server_config, coordinator_addr):
@@ -214,6 +208,8 @@ class Server:
         # If existing entries conflict with new entries, delete all existing entries starting with first conflicting entry
         if prev_log_index + 1 < len(self.log): # there are conflicting entries
             self.log = self.log[:prev_log_index + 1] # delete conflicting entries
+            print(f"DELETING LOG ENTIRES: 0-{prev_log_index+1}!")
+            self.shardManager.truncate_log(prev_log_index+1)
 
         # Append any new entries not in log
         for entry in entries:
@@ -241,7 +237,9 @@ class Server:
                 self.locks[sender] = True
                 self.locks[receiver] = True
 
-            self.log.append(LogEntry(term=entry["term"], transaction=transaction, is_2PC=is_2PC, tx_id=tx_id, committed_2PC=committed_2PC))
+            e = LogEntry(term=entry["term"], transaction=transaction, is_2PC=is_2PC, tx_id=tx_id, committed_2PC=committed_2PC)
+            self.shardManager.append_to_log(e)
+            self.log.append(e)
             print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
 
         # Update commit index
@@ -402,6 +400,7 @@ class Server:
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
         new_log_entry = LogEntry(term=self.current_term, transaction=transaction, is_2PC=is_2PC, tx_id=tx_id)
         self.log.append(new_log_entry)  # Append to leader log
+        self.shardManager.append_to_log(new_log_entry)
         print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
 
         # Send AppendEntries to all followers
@@ -612,6 +611,7 @@ class Server:
                     committed_2PC=(decision == "COMMIT")  # True for COMMIT, False for ABORT
                 )
                 self.log.append(decision_entry)
+                self.shardManager.append_to_log(decision_entry)
                 print(f"Appended {decision} log entry for tx_id {tx_id}")
                 print(f"log entry: {log_entry.to_dict()}")
                 self.commit_index = len(self.log) - 1 # FIXME: ??????

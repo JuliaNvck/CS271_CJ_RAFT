@@ -3,6 +3,8 @@
 # Get the current working directory
 current_dir=$(pwd)
 
+rm -r $current_dir/shards
+
 # Read the config.json file using Python
 config_file="config.json"
 coordinator_ip=$(python3 -c "import json; f=open('$config_file'); data=json.load(f); print(data['coordinator']['ip']); f.close()")

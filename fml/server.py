@@ -230,10 +230,16 @@ class Server:
                 transaction = Transaction(transaction["sender"], transaction["receiver"], transaction["amount"])
 
             # Lock accounts on followers
-            self.locks.setdefault(sender, False)
-            self.locks.setdefault(receiver, False)
-            self.locks[sender] = True
-            self.locks[receiver] = True
+            # self.locks.setdefault(sender, False)
+            # self.locks.setdefault(receiver, False)
+            if is_2PC:
+                if self.shardManager.is_account_in_cluster(sender):
+                    self.locks[sender] = True
+                elif self.shardManager.is_account_in_cluster(receiver):
+                    self.locks[receiver] = True
+            else:
+                self.locks[sender] = True
+                self.locks[receiver] = True
 
             self.log.append(LogEntry(term=entry["term"], transaction=transaction, is_2PC=is_2PC, tx_id=tx_id, committed_2PC=committed_2PC))
             print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
@@ -315,6 +321,18 @@ class Server:
         if self.role == "leader":
             # If this server is the leader, process the request
             self.enqueue_transaction(message, addr)
+        else:
+            # Forward request to leader
+            if self.current_leader:
+                print(f"Redirecting client request to leader at {self.current_leader}")
+                self.send_message(message, self.current_leader)
+            else:
+                print("Error: No known leader to forward request.")
+
+    def handle_prepare(self, message, addr):
+        if self.role == "leader":
+            # If this server is the leader, process the request
+            self.enqueue_cross_shard_transaction(message, addr)
         else:
             # Forward request to leader
             if self.current_leader:
@@ -444,8 +462,8 @@ class Server:
                     self.send_message(vote, self.coordinator_addr)
                     # Don't execute yet, wait for commit/abort decision
                     return
+                print(f"{self.my_address} committed log entries up to index {self.commit_index}")
                 self.apply_committed_entries()
-                print(f"Leader {self.my_address} committed log entries up to index {self.commit_index}")
                 return
 
     def apply_committed_entries(self):
@@ -461,7 +479,7 @@ class Server:
                     print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT decision.")
                     continue  # Wait until COMMIT message arrives
                 elif log_entry.is_2PC and log_entry.committed_2PC:
-                    print(f"Executing previously committed 2PC transaction (tx_id: {log_entry.tx_id}).")
+                    print(f"Executing committed 2PC transaction (tx_id: {log_entry.tx_id}).")
 
                 transaction = log_entry.transaction # Get transaction from log
                 print(f"Applying transaction: {transaction}")
@@ -481,10 +499,21 @@ class Server:
                     response = ClientResponse(success=True, sender=sender, receiver=receiver, amount=amount)
                     self.send_message(vars(response), self.coordinator_addr)
                 
-            # Unlock sender and receiver
-            self.locks[sender] = False
-            self.locks[receiver] = False
-            print(f"Unlocked sender {sender} and receiver {receiver}")
+                # Unlock sender and receiver
+                print(f"i: {i}, log[i]: {self.log[i]}")
+                if not log_entry.is_2PC:
+                    self.locks[sender] = False
+                    self.locks[receiver] = False
+                    print(f"Unlocked sender {sender} and receiver {receiver}")
+                elif log_entry.is_2PC:
+                    if self.shardManager.is_account_in_cluster(sender):
+                        # unlock sender
+                        self.locks[sender] = False
+                        print(f"Unlocked sender {sender}")
+                    elif self.shardManager.is_account_in_cluster(receiver):
+                        # unlock receiver
+                        self.locks[receiver] = False
+                        print(f"Unlocked receiver {receiver}")
 
             self.last_applied = self.commit_index  # Update last applied index
             
@@ -492,9 +521,21 @@ class Server:
             # print(f"{self.my_address} Account Balances: sender {sender}: {self.shardManager.get_balance(sender)}, receiver {receiver}: {self.shardManager.get_balance(receiver)}")
 
         finally:
-            print(f"Releasing locks for {sender} and {receiver}")
-            self.locks[sender] = False
-            self.locks[receiver] = False
+            # print(f"Releasing locks for {sender} and/or {receiver}")
+            # self.locks[sender] = False
+            # self.locks[receiver] = False
+            # Unlock sender and receiver
+            if not log_entry.is_2PC:
+                self.locks[sender] = False
+                self.locks[receiver] = False
+            elif log_entry.is_2PC:
+                if self.shardManager.is_account_in_cluster(sender):
+                    # unlock sender
+                    self.locks[sender] = False
+                elif self.shardManager.is_account_in_cluster(receiver):
+                    # unlock receiver
+                    self.locks[receiver] = False
+                    
 
     def handle_decision(self, message, addr):
         """Handles COMMIT/ABORT decision for a cross-shard (2PC) transaction."""
@@ -516,8 +557,11 @@ class Server:
 
                 else:  # "ABORT"
                     print(f"Cross-shard transaction ABORTED: {log_entry.transaction}")
-                    self.locks[log_entry.transaction.sender] = False
-                    self.locks[log_entry.transaction.receiver] = False  # Unlock accounts on abort
+                    # Unlock accounts on abort
+                    if self.shardManager.is_account_in_cluster(log_entry.transaction.sender):
+                        self.locks[log_entry.transaction.sender] = False
+                    elif self.shardManager.is_account_in_cluster(log_entry.transaction.receiver):
+                        self.locks[log_entry.transaction.receiver] = False
 
                 break
 
@@ -551,7 +595,7 @@ class Server:
                 # 2PC message handling
                 elif msg_type == "PREPARE":
                     # 2PC Prepare phase
-                    self.enqueue_cross_shard_transaction(message_data, addr)
+                    self.handle_prepare(message_data, addr)
                 elif msg_type in ["COMMIT", "ABORT"]:
                     # 2PC Commit/Abort phase (final execution decision from client)
                     self.handle_decision(message_data, addr)

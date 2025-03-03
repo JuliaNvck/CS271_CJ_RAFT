@@ -4,6 +4,7 @@ import json
 import time
 from udp_messenger import UDPMessenger
 from messages import ClientRequest, Prepare, Vote, Commit, Abort, Ack
+import os, csv
 
 class Client:
     def __init__(self, messenger, cluster_to_servers):
@@ -88,6 +89,27 @@ class Client:
             raise ValueError(f"Account {y} does not belong to any cluster.")
 
         return cluster_x, cluster_y
+    
+    def PrintBalance(self, account_id):
+        c = self.get_clusters((account_id, account_id, None))[0]
+        balances = {}
+        for server in self.cluster_to_servers[c]:
+            shard_file = f"shards/{server['id']}_data.csv"
+            if os.path.exists(shard_file):
+                with open(shard_file, 'r') as file:
+                    reader = csv.reader(file)
+                    for row in reader:
+                        if int(row[0]) == account_id:
+                            balances[server['id']] = int(row[1])
+
+        print("-" * 15)
+        print(f" Account: {account_id}")
+        print("-" * 15)
+        print("{:<7} {:<7}".format("Server", "Balance"))
+        print("-" * 15)
+        for server_id, balance in balances.items():
+            print("{:<7} ${:<7}".format(server_id, balance))
+        print("-" * 15)
         
 
 def main():
@@ -134,6 +156,7 @@ def main():
     # Issue transactions
     time.sleep(10)
     for t in transactions:
+        client.PrintBalance(1)
         if client.is_intra_shard_transaction(t):
             # issue RAFT transaction
             cluster = client.get_clusters(t)[0]

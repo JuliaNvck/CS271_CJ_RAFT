@@ -22,10 +22,10 @@ class ShardManager:
             os.makedirs(self.shards_folder)
 
         # Set the data file path inside the 'shards' folder
-        self.data_file = os.path.join(self.shards_folder, f"{self.server_id}_data.csv")
+        self.data_file = os.path.join(self.shards_folder, f"{self.server_id}_balance.csv")
         
         # Set the RAFT log file path
-        self.log_file = os.path.join(self.shards_folder, f"{self.server_id}_raft_log.json")
+        self.log_file = os.path.join(self.shards_folder, f"{self.server_id}_log.json")
 
         # Determine the account offset based on the cluster
         if self.cluster == 1:
@@ -50,12 +50,6 @@ class ShardManager:
             self.append_to_log([])  # Create an empty log file
 
     def get_balance(self, account_id):
-        """
-        Retrieve the balance for a specific account.
-        
-        :param account_id: The account ID (e.g., 1, 2, ..., 3000).
-        :return: The balance as an integer.
-        """
         if not self.is_account_in_cluster(account_id):
             raise ValueError(f"Account {account_id} does not belong to cluster {self.cluster}.")
 
@@ -67,12 +61,6 @@ class ShardManager:
         raise ValueError(f"Account {account_id} not found in the data file.")
 
     def update_balance(self, account_id, new_balance):
-        """
-        Update the balance for a specific account.
-        
-        :param account_id: The account ID (e.g., 1, 2, ..., 3000).
-        :param new_balance: The new balance value.
-        """
         if not self.is_account_in_cluster(account_id):
             raise ValueError(f"Account {account_id} does not belong to cluster {self.cluster}.")
 
@@ -94,15 +82,7 @@ class ShardManager:
             writer = csv.writer(file)
             writer.writerows(rows)
 
-    def execute_transaction(self, transaction):
-        """
-        Execute a transaction of the form (x, y, amt).
-        
-        :param transaction: A tuple (x, y, amt), where:
-            - x: The source account ID.
-            - y: The target account ID.
-            - amt: The amount to transfer.
-        """
+    def execute_transaction(self, transaction, commit_index):
         x, y, amt = transaction
 
         if not self.is_account_in_cluster(x) and not self.is_account_in_cluster(y):
@@ -118,13 +98,10 @@ class ShardManager:
             y_balance = self.get_balance(y)
             self.update_balance(y, y_balance + amt)
 
+        # Update the commit index in the log file
+        self.store_commit_index(commit_index)
+
     def is_account_in_cluster(self, account_id):
-        """
-        Check if an account belongs to the current cluster.
-        
-        :param account_id: The account ID (e.g., 1, 2, ..., 3000).
-        :return: True if the account belongs to the cluster, False otherwise.
-        """
         if self.cluster == 1:
             return 0 <= account_id <= 1000
         elif self.cluster == 2:
@@ -140,14 +117,16 @@ class ShardManager:
         """
         Retrieve the entire RAFT log from disk.
         
-        :return: A list of LogEntry objects.
+        :return: A list of LogEntry objects and the commit index.
         """
         if not os.path.exists(self.log_file):
-            return []
+            return [], -1
         
         with open(self.log_file, 'r') as file:
             log_data = json.load(file)
-            return [LogEntry.from_dict(entry) for entry in log_data]
+            commit_index = log_data.get("commit_index", -1)
+            log_entries = [LogEntry.from_dict(entry) for entry in log_data.get("entries", [])]
+            return log_entries, commit_index
     
     def append_to_log(self, new_entries):
         """
@@ -155,7 +134,7 @@ class ShardManager:
         
         :param new_entries: A list of LogEntry objects to append.
         """
-        log = self.get_log()
+        log, commit_index = self.get_log()
         
         # Convert LogEntry objects to dictionaries
         if isinstance(new_entries, list):
@@ -167,58 +146,41 @@ class ShardManager:
         
         # Save the updated log
         with open(self.log_file, 'w') as file:
-            json.dump([entry.to_dict() for entry in log], file, indent=2)
+            json.dump({"entries": [entry.to_dict() for entry in log], "commit_index": commit_index}, file, indent=2)
     
     def truncate_log(self, last_index):
         """
         Truncate the log to keep entries up to last_index (inclusive).
-        
+        Works exactly as list slicing.
+
         :param last_index: The index of the last entry to keep.
         :return: The truncated log as a list of LogEntry objects.
         """
-        log = self.get_log()
+        log, commit_index = self.get_log()
         
         # Check if last_index is valid
         if last_index < 0 or last_index >= len(log):
             return log  # Return the original log if last_index is invalid
         
-        # Truncate the log in memory
         truncated_log = log[:last_index]
         
-        # Save the truncated log to the file
         with open(self.log_file, 'w') as file:
-            json.dump([entry.to_dict() for entry in truncated_log], file, indent=2)
+            json.dump({"entries": [entry.to_dict() for entry in truncated_log], "commit_index": commit_index}, file, indent=2)
         
-        # Return the truncated log
         return truncated_log
     
     def get_last_log_entry(self):
-        """
-        Get the last entry in the RAFT log.
-        
-        :return: The last LogEntry object, or None if the log is empty.
-        """
-        log = self.get_log()
+        log, _ = self.get_log()
         if not log:
             return None
         return log[-1]
     
     def get_log_length(self):
-        """
-        Get the current length of the RAFT log.
-        
-        :return: The number of entries in the log.
-        """
-        return len(self.get_log())
+        log, _ = self.get_log()
+        return len(log)
     
     def apply_log_entries(self, start_index, end_index=None):
-        """
-        Apply log entries from start_index to end_index (inclusive) to update state.
-        
-        :param start_index: The starting index.
-        :param end_index: The ending index (inclusive). If None, apply to the end of the log.
-        """
-        log = self.get_log()
+        log, _ = self.get_log()
         if not log:
             return
         
@@ -228,7 +190,12 @@ class ShardManager:
         for i in range(start_index, end_index + 1):
             if 0 <= i < len(log):
                 entry = log[i]
-                self.execute_transaction(entry.transaction)
+                self.execute_transaction(entry.transaction, i)  # Pass the commit index
+
+    def store_commit_index(self, commit_index):
+        log, _ = self.get_log()
+        with open(self.log_file, 'w') as file:
+            json.dump({"entries": [entry.to_dict() for entry in log], "commit_index": commit_index}, file, indent=2)
 
 # Example usage
 if __name__ == "__main__":

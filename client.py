@@ -1,17 +1,17 @@
-# client.py
 import sys
 import json
 import time
 from udp_messenger import UDPMessenger
 from messages import ClientRequest, Prepare, Vote, Commit, Abort, Ack
 import os, csv
+import threading
 
 class Client:
     def __init__(self, messenger, cluster_to_servers):
         self.messenger = messenger
         self.cluster_to_servers = cluster_to_servers
         self.transaction_id = 0
-        self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}}
+        self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}
 
         self.messenger.message_handler = self.handle_message
 
@@ -94,7 +94,7 @@ class Client:
         c = self.get_clusters((account_id, account_id, None))[0]
         balances = {}
         for server in self.cluster_to_servers[c]:
-            shard_file = f"shards/{server['id']}_data.csv"
+            shard_file = f"shards/{server['id']}_balance.csv"
             if os.path.exists(shard_file):
                 with open(shard_file, 'r') as file:
                     reader = csv.reader(file)
@@ -111,6 +111,29 @@ class Client:
             print("{:<7} ${:<7}".format(server_id, balance))
         print("-" * 15)
         
+
+def issue_transactions(client, transactions, cluster_to_servers):
+    for t in transactions:
+        if client.is_intra_shard_transaction(t):
+            # issue RAFT transaction
+            cluster = client.get_clusters(t)[0]
+            receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
+            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
+        else:
+            # issue 2PC transaction
+            client.transaction_id += 1
+            tx_id = client.transaction_id
+            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
+
+            c_x, c_y = client.get_clusters(t)
+            # message someone from x
+            recv = cluster_to_servers[c_x][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+
+            # message someone from y
+            recv = cluster_to_servers[c_y][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+        time.sleep(10)
 
 def main():
     if len(sys.argv) < 2:
@@ -140,11 +163,14 @@ def main():
         log_level="info"
     )
 
-    # Run client
     client = Client(messenger, cluster_to_servers)
     print(f"Running as Client on port {my_port}...")
 
-    # Load transactions
+    print(
+    "Commands:\n"
+    "  - PrintBalance <account#> (pb <account#>)\n"
+)
+
     transactions = []
     with open('transactions.csv', "r") as file:
         for line in file:
@@ -153,30 +179,28 @@ def main():
                 x, y, amt = parts
                 transactions.append((int(x.strip()), int(y.strip()), int(amt)))
 
-    # Issue transactions
-    time.sleep(10)
-    for t in transactions:
-        client.PrintBalance(1)
-        if client.is_intra_shard_transaction(t):
-            # issue RAFT transaction
-            cluster = client.get_clusters(t)[0]
-            receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
-            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
-        else:
-            # issue 2PC transaction
-            client.transaction_id += 1
-            tx_id = client.transaction_id
-            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
+    time.sleep(10) # wait for servers to launch
+    transaction_thread = threading.Thread(target=issue_transactions, args=(client, transactions, cluster_to_servers))
+    transaction_thread.daemon = True
+    transaction_thread.start()
 
-            c_x, c_y = client.get_clusters(t)
-            # message someone from x
-            recv = cluster_to_servers[c_x][0] # lowest id in cluster
-            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+    while True:
+        command = sys.stdin.readline().strip()
+        if command.startswith("PrintBalance") or command.startswith("pb"):
+            parts = command.split()
+            if len(parts) == 2:
+                try:
+                    account_id = int(parts[1])
+                    client.PrintBalance(account_id)
+                except ValueError:
+                    print("Invalid account number.")
+        elif command.startswith("PrintDatastore") or command.startswith('pd'):
+            # list committed transactions on each server
+            pass
+        elif command.startswith("Performance") or command.startswith('perf'):
+            # display perf stats
+            pass
 
-            # message someone from y
-            recv = cluster_to_servers[c_y][0] # lowest id in cluster
-            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
-        time.sleep(10)
 
 if __name__ == "__main__":
     main()

@@ -514,7 +514,7 @@ class Server:
                 print(f"Applying transaction: {transaction}")
                 sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
                 # disk write
-                self.shardManager.execute_transaction((sender, receiver, amount))
+                self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
             # Update balances in data store
             # self.data_store.setdefault(sender, 0)

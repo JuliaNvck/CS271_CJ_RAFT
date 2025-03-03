@@ -1,3 +1,4 @@
+# message.py
 class Message:
     """Base class for all message types."""
     def __init__(self, msg_type):
@@ -7,6 +8,37 @@ class Message:
         """Converts message to dictionary format."""
         return self.__dict__
 
+    @staticmethod
+    def from_dict(message_dict):
+        """Converts a dictionary to a Message object."""
+        msg_type = message_dict["msg_type"]
+        message_dict.pop('msg_type')
+        if msg_type == "CLIENT_REQUEST":
+            return ClientRequest(**message_dict)
+        elif msg_type == "APPEND_ENTRIES":
+            return AppendEntries(**message_dict)
+        elif msg_type == "REQUEST_VOTE":
+            return RequestVote(**message_dict)
+        elif msg_type == "VOTE_RESPONSE":
+            return VoteResponse(**message_dict)
+        elif msg_type == "APPEND_ACK":
+            return AppendAck(**message_dict)
+        elif msg_type == "CLIENT_RESPONSE":
+            return ClientResponse(**message_dict)
+        elif msg_type == "PREPARE":
+            return Prepare(**message_dict)
+        elif msg_type == "VOTE":
+            return Vote(**message_dict)
+        elif msg_type == "COMMIT":
+            return Commit(**message_dict)
+        elif msg_type == "ABORT":
+            return Abort(**message_dict)
+        elif msg_type == "ACK":
+            return Ack(**message_dict)
+        else:
+            raise ValueError(f"Unknown message type: {msg_type}")
+
+# RAFT-related message types
 class ClientRequest(Message):
     """Message for client transaction requests."""
     def __init__(self, sender, receiver, amount):
@@ -56,3 +88,39 @@ class ClientResponse(Message):
         self.sender = sender
         self.receiver = receiver
         self.amount = amount
+
+# 2PC-related message types
+class Prepare(Message):
+    """Prepare message for 2PC."""
+    def __init__(self, tx_id, data):
+        super().__init__("PREPARE")
+        self.tx_id = tx_id
+        self.sender = data[0]
+        self.receiver = data[1]
+        self.amount = data[2]
+        # self.data = data
+
+class Vote(Message):
+    """Vote message for 2PC."""
+    def __init__(self, tx_id, vote):
+        super().__init__("VOTE")
+        self.tx_id = tx_id
+        self.vote = vote
+
+class Commit(Message):
+    """Commit message for 2PC."""
+    def __init__(self, tx_id):
+        super().__init__("COMMIT")
+        self.tx_id = tx_id
+
+class Abort(Message):
+    """Abort message for 2PC."""
+    def __init__(self, tx_id):
+        super().__init__("ABORT")
+        self.tx_id = tx_id
+
+class Ack(Message):
+    """Acknowledgment message for 2PC."""
+    def __init__(self, tx_id):
+        super().__init__("ACK")
+        self.tx_id = tx_id

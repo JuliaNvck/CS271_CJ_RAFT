@@ -1,72 +1,159 @@
-import json
-import socket
+# client.py
 import sys
-from messages import ClientRequest
+import json
 import time
-import threading
+from udp_messenger import UDPMessenger
+from messages import ClientRequest, Prepare, Vote, Commit, Abort, Ack
 
-# Server list (UDP addresses)
-SERVERS = [("127.0.0.1", 5000), ("127.0.0.1", 5001), ("127.0.0.1", 5002)]
+class Client:
+    def __init__(self, messenger, cluster_to_servers):
+        self.messenger = messenger
+        self.cluster_to_servers = cluster_to_servers
+        self.transaction_id = 0
+        self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}}
 
-# Define a fixed port for the client to listen on
-CLIENT_HOST = "127.0.0.1"
-CLIENT_PORT = 6000  # Choose a specific port for listening
+        self.messenger.message_handler = self.handle_message
 
-# Create a UDP socket for listening and sending transactions
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-client_socket.bind((CLIENT_HOST, CLIENT_PORT))
-client_socket.settimeout(6)  # Set a timeout for receiving responses
+    def handle_message(self, message, addr):
+        """Handle incoming messages."""
+        if message.msg_type == "VOTE":
+            self.handle_vote(message.tx_id, addr, message.vote)
+        elif message.msg_type == "ACK":
+            self.handle_ack(message.tx_id, addr)
 
-def read_input_file(file_path):
-    """Reads the input file containing (x, y, amt) transactions."""
+    def handle_vote(self, tx_id, server_addr, vote):
+        """Process votes from servers."""
+        if tx_id not in self.pending_transactions:
+            return
+        
+        self.pending_transactions[tx_id]["votes"][server_addr] = vote
+        
+        # Check if all votes received
+        if len(self.pending_transactions[tx_id]["votes"]) == 2:
+            all_yes = all(vote == "yes" for vote in self.pending_transactions[tx_id]["votes"].values())
+            decision = Commit(tx_id=tx_id) if all_yes else Abort(tx_id=tx_id)
+            c_x, c_y = self.get_clusters(self.pending_transactions[tx_id]["transaction"])
+            self.messenger.clustercast(decision, c_x)
+            self.messenger.clustercast(decision, c_y)
+
+    def handle_ack(self, tx_id, server_addr):
+        """Process acknowledgments after Commit/Abort."""
+        self.pending_transactions[tx_id]["acks"][server_addr] = True
+        # ignore for now. who cares about acks?
+        # if len(self.pending_transactions[tx_id]["acks"]) == len(self.server_addresses):
+        #     del self.pending_transactions[tx_id]
+
+    def is_intra_shard_transaction(self, transaction):
+        x, y, _ = transaction
+
+        if 0 <= x <= 1000:
+            cluster_x = 1
+        elif 1001 <= x <= 2000:
+            cluster_x = 2
+        elif 2001 <= x <= 3000:
+            cluster_x = 3
+        else:
+            raise ValueError(f"Account {x} does not belong to any cluster.")
+
+        if 0 <= y <= 1000:
+            cluster_y = 1
+        elif 1001 <= y <= 2000:
+            cluster_y = 2
+        elif 2001 <= y <= 3000:
+            cluster_y = 3
+        else:
+            raise ValueError(f"Account {y} does not belong to any cluster.")
+
+        return cluster_x == cluster_y
+    
+    def get_clusters(self, transaction):
+        x, y, _ = transaction
+
+        if 0 <= x <= 1000:
+            cluster_x = 1
+        elif 1001 <= x <= 2000:
+            cluster_x = 2
+        elif 2001 <= x <= 3000:
+            cluster_x = 3
+        else:
+            raise ValueError(f"Account {x} does not belong to any cluster.")
+
+        if 0 <= y <= 1000:
+            cluster_y = 1
+        elif 1001 <= y <= 2000:
+            cluster_y = 2
+        elif 2001 <= y <= 3000:
+            cluster_y = 3
+        else:
+            raise ValueError(f"Account {y} does not belong to any cluster.")
+
+        return cluster_x, cluster_y
+        
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python3 client.py <my_port>")
+        sys.exit(1)
+
+    with open("config.json", "r") as f:
+        config = json.load(f)
+    
+    my_port = int(sys.argv[1])
+
+    cluster_to_servers = {}
+    for server in config["servers"]:
+        addr = server["ip"]
+        port = server["port"]
+        cluster = server["cluster"]
+        server_id = server["id"]
+        
+        if cluster not in cluster_to_servers:
+            cluster_to_servers[cluster] = []
+        cluster_to_servers[cluster].append({"id": server_id, "addr": (addr,port)})
+
+    messenger = UDPMessenger(
+        my_ip="127.0.0.1",
+        my_port=my_port,
+        server_config=config['servers'],
+        log_level="info"
+    )
+
+    # Run client
+    client = Client(messenger, cluster_to_servers)
+    print(f"Running as Client on port {my_port}...")
+
+    # Load transactions
     transactions = []
-    with open(file_path, "r") as file:
+    with open('transactions.csv', "r") as file:
         for line in file:
             parts = line.strip().split(",")
             if len(parts) == 3:
                 x, y, amt = parts
-                transactions.append((x.strip(), y.strip(), int(amt)))
-    return transactions
+                transactions.append((int(x.strip()), int(y.strip()), int(amt)))
 
-def listen_for_responses():
-    """Continuously listens for responses from the leader."""
-    print(f"Client listening for responses on {CLIENT_HOST}:{CLIENT_PORT}")
-    while True:
-        try:
-            response, addr = client_socket.recvfrom(4096)  # Listen for response
-            response_data = json.loads(response.decode("utf-8"))
-            print(f"Received response from {addr}: {response_data}")
-        except socket.timeout:
-            continue  # Keep listening
+    # Issue transactions
+    time.sleep(10)
+    for t in transactions:
+        if client.is_intra_shard_transaction(t):
+            # issue RAFT transaction
+            cluster = client.get_clusters(t)[0]
+            receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
+            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
+        else:
+            # issue 2PC transaction
+            client.transaction_id += 1
+            tx_id = client.transaction_id
+            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
 
-def send_transaction(x, y, amt):
-    """Sends a transaction request to a designated server using UDP."""
-    # Send to first server in the list
-    server = SERVERS[0]
-    message = ClientRequest(sender=x, receiver=y, amount=amt)
-    serialized_message = json.dumps(message.to_dict()).encode('utf-8')
+            c_x, c_y = client.get_clusters(t)
+            # message someone from x
+            recv = cluster_to_servers[c_x][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
 
-    try:
-        client_socket.sendto(serialized_message, server)
-        print(f"Sent transaction to {server}: {message.to_dict()}")
-    except Exception as e:
-        print(f"Error communicating with leader: {e}")
-
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: python client.py <input_file>")
-        sys.exit(1)
-
-    input_file = sys.argv[1]
-    transactions = read_input_file(input_file)
-
-    # Start listening thread for responses
-    listener_thread = threading.Thread(target=listen_for_responses, daemon=True)
-    listener_thread.start()
-
-    for x, y, amt in transactions:
-        send_transaction(x, y, amt)
-        time.sleep(0.1)
+            # message someone from y
+            recv = cluster_to_servers[c_y][0] # lowest id in cluster
+            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+        time.sleep(10)
 
 if __name__ == "__main__":
     main()

@@ -55,6 +55,7 @@ tell application "Terminal"
 end tell
 EOF
         fi
+        sleep 0.2
     done
 done
 

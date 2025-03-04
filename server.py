@@ -13,7 +13,7 @@ from log_entry import LogEntry
 from transaction import Transaction
 
 HEARTBEAT_INTERVAL = 3          # seconds
-ELECTION_TIMEOUT_RANGE = (3, 6) # seconds
+ELECTION_TIMEOUT_RANGE = (1, 10) # seconds
 TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
 SHARD_SIZE = 1000
 RED  = '\033[31m'

@@ -707,6 +707,7 @@ class Server:
     def send_message(self, message, receiver):
         serialized_message = json.dumps(message).encode('utf-8') 
         try:
+            time.sleep(0.2)
             self.socket.sendto(serialized_message, receiver)  # send the message via UDP
             #print(f"[T] {self.SERVER_NAMES[receiver]}: {json.dumps(message, indent=2)}")
             msg_type = message.pop('msg_type', 'UNKNOWN')  # Extract 'msg_type' or default to 'UNKNOWN'
@@ -748,7 +749,7 @@ class Server:
         """Send a message to all servers (except oneself) in a cluster"""
 
         serialized_message = json.dumps(message).encode('utf-8')
-
+        time.sleep(0.2)
         for server_info in self.cluster_to_servers[self.my_cluster]:
             try:
                 self.socket.sendto(serialized_message, server_info['addr'])

@@ -1,0 +1,4 @@
+- timeout for 2pc servers
+- thread messenge sending
+- reconstruct log from disk on resurrection
+- testing concurrent cross-shard

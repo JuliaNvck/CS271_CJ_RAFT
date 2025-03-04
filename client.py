@@ -220,36 +220,33 @@ class Client:
                 print()
         print("-" * 40)
 
-def issue_transactions(client, transactions, cluster_to_servers):
-    time.sleep(15) # wait for servers to launch
-    for t in transactions:
-        # Record transaction start time
-        if client.is_intra_shard_transaction(t):
-            # Store using transaction tuple as key for non-2PC transactions
-            client.transaction_times[(t[0], t[1], t[2])] = time.time()
-            
-            # issue RAFT transaction
-            cluster = client.get_clusters(t)[0]
-            receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
-            client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
-        else:
-            # issue 2PC transaction
-            client.transaction_id += 1
-            tx_id = client.transaction_id
-            
-            # Store transaction start time
-            client.transaction_times[tx_id] = time.time()
-            client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
+def issue_transaction(client, trans, cluster_to_servers):
+    # Record transaction start time
+    if client.is_intra_shard_transaction(trans):
+        # Store using transaction tuple as key for non-2PC transactions
+        client.transaction_times[(trans[0], trans[1], trans[2])] = time.time()
+        
+        # issue RAFT transaction
+        cluster = client.get_clusters(trans)[0]
+        receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
+        client.messenger.send_message(ClientRequest(trans[0], trans[1], trans[2]), receiver['addr'])
+    else:
+        # issue 2PC transaction
+        client.transaction_id += 1
+        tx_id = client.transaction_id
+        
+        # Store transaction start time
+        client.transaction_times[tx_id] = time.time()
+        client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": trans}
 
-            c_x, c_y = client.get_clusters(t)
-            # message someone from x
-            recv = cluster_to_servers[c_x][0] # lowest id in cluster
-            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
+        c_x, c_y = client.get_clusters(trans)
+        # message someone from x
+        recv = cluster_to_servers[c_x][0] # lowest id in cluster
+        client.messenger.send_message(Prepare(tx_id=tx_id, data=trans), recv['addr'])
 
-            # message someone from y
-            recv = cluster_to_servers[c_y][0] # lowest id in cluster
-            client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
-        time.sleep(5)
+        # message someone from y
+        recv = cluster_to_servers[c_y][0] # lowest id in cluster
+        client.messenger.send_message(Prepare(tx_id=tx_id, data=trans), recv['addr'])
 
 def main():
     if len(sys.argv) < 2:
@@ -297,12 +294,16 @@ def main():
                 x, y, amt = parts
                 transactions.append((int(x.strip()), int(y.strip()), int(amt.strip())))
 
-    transaction_thread = threading.Thread(target=issue_transactions, args=(client, transactions, cluster_to_servers))
-    transaction_thread.daemon = True
-    transaction_thread.start()
-
+    tx_index = 0
     while True:
-        command = sys.stdin.readline().strip()
+        command = sys.stdin.readline()
+        if command == '\n':
+            if tx_index < len(transactions):
+                issue_transaction(client, transactions[tx_index], cluster_to_servers)
+                tx_index += 1
+            continue
+
+        command = command.strip()
         if command.startswith("PrintBalance") or command.startswith("pb"):
             parts = command.split()
             if len(parts) == 2:

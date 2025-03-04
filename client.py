@@ -12,6 +12,10 @@ class Client:
         self.cluster_to_servers = cluster_to_servers
         self.transaction_id = 0
         self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}
+        self.transaction_times = {}  # Track start and end times for each transaction
+        self.completed_transactions = 0  # Count of completed transactions
+        self.total_latency = 0  # Cumulative latency for all transactions
+        self.non_2pc_counter = 0  # Counter to differentiate non-2PC transactions
 
         self.messenger.message_handler = self.handle_message
 
@@ -21,6 +25,8 @@ class Client:
             self.handle_vote(message.tx_id, addr, message.vote)
         elif message.msg_type == "ACK":
             self.handle_ack(message.tx_id, addr)
+        elif message.msg_type == "CLIENT_RESPONSE":
+            self.handle_client_response(message)
 
     def handle_vote(self, tx_id, server_addr, vote):
         """Process votes from servers."""
@@ -40,9 +46,46 @@ class Client:
     def handle_ack(self, tx_id, server_addr):
         """Process acknowledgments after Commit/Abort."""
         self.pending_transactions[tx_id]["acks"][server_addr] = True
-        # ignore for now. who cares about acks?
-        # if len(self.pending_transactions[tx_id]["acks"]) == len(self.server_addresses):
-        #     del self.pending_transactions[tx_id]
+
+        # Track transaction completion time for 2PC transactions
+        if tx_id in self.transaction_times:
+            end_time = time.time()
+            start_time = self.transaction_times[tx_id]
+            latency = end_time - start_time
+            self.total_latency += latency
+            self.completed_transactions += 1
+            del self.transaction_times[tx_id]
+
+    def handle_client_response(self, message):
+        """Process ClientResponse messages for non-2PC transactions."""
+        # Extract the transaction details from the message
+        sender = message.sender
+        receiver = message.receiver
+        amount = message.amount
+
+        # Find the corresponding transaction in transaction_times
+        for key, start_time in self.transaction_times.items():
+            if isinstance(key, tuple) and key[:3] == (sender, receiver, amount):
+                end_time = time.time()
+                latency = end_time - start_time
+                self.total_latency += latency
+                self.completed_transactions += 1
+                del self.transaction_times[key]
+                break
+
+    def Performance(self):
+        if self.completed_transactions == 0:
+            print("No transactions completed yet.")
+            return
+
+        average_latency = self.total_latency / self.completed_transactions
+        throughput = self.completed_transactions / (time.time() - min(self.transaction_times.values(), default=time.time()))
+
+        print("-" * 40)
+        print("Performance Metrics:")
+        print(f"  Throughput: {throughput:.2f} transactions/second")
+        print(f"  Average Latency: {average_latency:.2f} seconds")
+        print("-" * 40)
 
     def is_intra_shard_transaction(self, transaction):
         x, y, _ = transaction

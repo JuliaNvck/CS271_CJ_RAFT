@@ -139,7 +139,8 @@ class Server:
         if self.role == "candidate":
             time.sleep(random.uniform(2, 5)) # Prevent election collisions with random election delay
             self.start_election()
-                
+
+
     def send_heartbeats(self):
         """Send periodic heartbeats (empty AppendEntries RPC) to maintain authority."""
         while self.role == "leader":
@@ -636,6 +637,30 @@ class Server:
         self.send_message(ack_message, addr)
 
     
+    def handle_append_ack(self, message, addr):
+        """Handle incoming AppendAck responses to maintain log consistency."""
+        success = message.get("success", False)
+
+        if success:
+            print(f"Received successful APPEND_ACK from {addr}")
+            # Move next index forward and update match index
+            self.next_index[addr] = len(self.log)
+            self.match_index[addr] = self.next_index[addr] - 1
+            print(f"Match index for {addr}: {self.match_index[addr]}")
+            print(f"Next index for {addr}: {self.next_index[addr]}")
+
+            # Check for majority replication and update commit index if applicable
+            match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
+            if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
+                self.update_commit_index()
+
+        else:
+            print(f"Log inconsistency detected with {addr}, initiating log repair...")
+            # Decrement next index and retry log replication
+            self.next_index[addr] = max(0, self.next_index[addr] - 1)
+            self.send_append_entries(addr)
+
+    
     def listen(self):
         # Listen for incoming UDP messages
         print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
@@ -657,6 +682,9 @@ class Server:
                     self.handle_vote_request(message_data, addr)
                 elif msg_type == "CLIENT_REQUEST":
                     self.handle_client_request(message_data, addr)  # Process client request
+                elif msg_type == "APPEND_ACK":
+                    self.handle_append_ack(message_data, addr)
+
 
                 # 2PC message handling
                 elif msg_type == "PREPARE":
@@ -694,7 +722,7 @@ class Server:
 
         entries = [{
             "term": entry.term,
-            "transaction": vars(entry.transaction) if entry.transaction is not None else None, 
+            "transaction": vars(entry.transaction) if isinstance(entry.transaction, Transaction) else None, 
             "is_2PC": entry.is_2PC,
             "tx_id": entry.tx_id,
             "committed_2PC": entry.committed_2PC

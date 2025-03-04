@@ -530,9 +530,9 @@ class Server:
             # elif log_entry.is_2PC and log_entry.committed_2PC:
             #     print(f"Executing committed 2PC transaction (tx_id: {log_entry.tx_id}).")
 
-                # transaction = log_entry.transaction # Get transaction from log
-                print(f"Applying transaction: {(sender, receiver, amount)}")
-                self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
+            # transaction = log_entry.transaction # Get transaction from log
+            print(f"Applying transaction: {(sender, receiver, amount)}")
+            self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
             # Update balances in data store
             # self.data_store.setdefault(sender, 0)

@@ -213,27 +213,29 @@ class Server:
 
         # Append any new entries not in log
         for entry in entries:
-            sender = entry["transaction"]["sender"]
-            receiver = entry["transaction"]["receiver"]
-            print(f"sender: {sender}, receiver: {receiver}")
-            print(f"entry: {entry}")
-            transaction=entry["transaction"]
             is_2PC = entry["is_2PC"]
+            transaction=entry["transaction"]
+            if transaction is not None:
+                sender = transaction["sender"]
+                receiver = transaction["receiver"]
+                print(f"sender: {sender}, receiver: {receiver}")
+                print(f"entry: {entry}")
+                
             tx_id = entry.get("tx_id")  # Extract tx_id safely
             committed_2PC = entry.get("committed_2PC", False)
             # Create transaction object from dict
-            if isinstance(transaction, dict):
+            if not is_2PC and isinstance(transaction, dict):
                 transaction = Transaction(transaction["sender"], transaction["receiver"], transaction["amount"])
 
             # Lock accounts on followers
             # self.locks.setdefault(sender, False)
             # self.locks.setdefault(receiver, False)
-            if is_2PC:
+            if is_2PC and transaction is not None:
                 if self.shardManager.is_account_in_cluster(sender):
                     self.locks[sender] = True
                 elif self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = True
-            else:
+            elif not is_2PC:
                 self.locks[sender] = True
                 self.locks[receiver] = True
 
@@ -486,7 +488,8 @@ class Server:
                     ),
                     (None, None)
                 )
-                print(f"decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
+                if decision_entry_index:
+                    print(f"decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
                 
                 if not decision_entry:
                     print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
@@ -510,7 +513,18 @@ class Server:
             #     print(f"Executing committed 2PC transaction (tx_id: {log_entry.tx_id}).")
 
             if log_entry.transaction:
-                transaction = log_entry.transaction # Get transaction from log
+                # Handle the case where transaction is a dict instead of a Transaction object
+                if isinstance(log_entry.transaction, dict):
+                    transaction_data = log_entry.transaction
+                    transaction = Transaction(
+                        sender=transaction_data["sender"],
+                        receiver=transaction_data["receiver"],
+                        amount=transaction_data["amount"]
+                    )
+                else:
+                    transaction = log_entry.transaction
+
+                # transaction = log_entry.transaction # Get transaction from log
                 print(f"Applying transaction: {transaction}")
                 sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
                 # disk write
@@ -677,9 +691,10 @@ class Server:
 
         # Send all missing log entries starting from next_index
         # entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
+
         entries = [{
             "term": entry.term,
-            "transaction": vars(entry.transaction),
+            "transaction": vars(entry.transaction) if entry.transaction is not None else None, 
             "is_2PC": entry.is_2PC,
             "tx_id": entry.tx_id,
             "committed_2PC": entry.committed_2PC

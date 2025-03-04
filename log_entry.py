@@ -13,7 +13,11 @@ class LogEntry:
         """Convert LogEntry to a dictionary for serialization."""
         return {
             'term': self.term,
-            'transaction': self.transaction.to_dict() if self.transaction is not None else Transaction(None, None, None).to_dict(),  # Serialize the Transaction object
+            'transaction': (
+            self.transaction.to_dict() if isinstance(self.transaction, Transaction) 
+            else self.transaction if isinstance(self.transaction, dict) 
+            else None
+        ), # self.transaction.to_dict() if self.transaction is not None else Transaction(None, None, None).to_dict(),  # Serialize the Transaction object
             'is_2PC': self.is_2PC,
             'tx_id': self.tx_id,
             'committed_2PC': self.committed_2PC
@@ -23,7 +27,10 @@ class LogEntry:
     def from_dict(cls, data):
         """Create a LogEntry from a dictionary."""
         # Deserialize the Transaction object
-        transaction = Transaction.from_dict(data['transaction'])
+        transaction = None
+        if data['transaction'] is not None:
+            transaction = Transaction.from_dict(data['transaction'])
+        # transaction = Transaction.from_dict(data['transaction'])
         return cls(
             term=data['term'],
             transaction=transaction,

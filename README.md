@@ -1,4 +1,4 @@
-# Distributed Transaction Processing System (CS 271: Distributed Systems)
+# Distributed Transaction Processing System (CS 271: Advanced Topics in Distributed Systems)
 
 This project implements a fault-tolerant distributed transaction processing system for a simple banking application. The system uses the Raft protocol for intra-shard transactions and the Two-Phase Commit (2PC) protocol for cross-shard transactions, ensuring consistency and fault tolerance across distributed clusters.
 

@@ -12,6 +12,10 @@ class Client:
         self.cluster_to_servers = cluster_to_servers
         self.transaction_id = 0
         self.pending_transactions = {}  # {tx_id: {"votes": {}, "acks": {}, "transaction": t}}
+        self.transaction_times = {}  # Track start and end times for each transaction
+        self.completed_transactions = 0  # Count of completed transactions
+        self.total_latency = 0  # Cumulative latency for all transactions
+        self.start_time = time.time()  # Track when the client started processing transactions
 
         self.messenger.message_handler = self.handle_message
 
@@ -21,6 +25,8 @@ class Client:
             self.handle_vote(message.tx_id, addr, message.vote)
         elif message.msg_type == "ACK":
             self.handle_ack(message.tx_id, addr)
+        elif message.msg_type == "CLIENT_RESPONSE":
+            self.handle_client_response(message)
 
     def handle_vote(self, tx_id, server_addr, vote):
         """Process votes from servers."""
@@ -39,10 +45,62 @@ class Client:
 
     def handle_ack(self, tx_id, server_addr):
         """Process acknowledgments after Commit/Abort."""
+        if tx_id not in self.pending_transactions:
+            return
+            
         self.pending_transactions[tx_id]["acks"][server_addr] = True
-        # ignore for now. who cares about acks?
-        # if len(self.pending_transactions[tx_id]["acks"]) == len(self.server_addresses):
-        #     del self.pending_transactions[tx_id]
+
+        # Track transaction completion time for 2PC transactions
+        if tx_id in self.transaction_times:
+            end_time = time.time()
+            start_time = self.transaction_times[tx_id]
+            latency = end_time - start_time
+            self.total_latency += latency
+            self.completed_transactions += 1
+            del self.transaction_times[tx_id]
+            
+            # Clean up completed transactions
+            if len(self.pending_transactions[tx_id]["acks"]) >= 2:
+                del self.pending_transactions[tx_id]
+
+    def handle_client_response(self, message):
+        """Process ClientResponse messages for non-2PC transactions."""
+        # Extract the transaction details from the message
+        sender = message.sender
+        receiver = message.receiver
+        amount = message.amount
+
+        # Find the corresponding transaction in transaction_times
+        tx_key = (sender, receiver, amount)
+        if tx_key in self.transaction_times:
+            end_time = time.time()
+            start_time = self.transaction_times[tx_key]
+            latency = end_time - start_time
+            self.total_latency += latency
+            self.completed_transactions += 1
+            del self.transaction_times[tx_key]
+
+    def Performance(self):
+        """Calculate and display performance metrics."""
+        if self.completed_transactions == 0:
+            print("No transactions completed yet.")
+            return
+
+        current_time = time.time()
+        elapsed_time = current_time - self.start_time
+        
+        # Calculate average latency
+        average_latency = self.total_latency / self.completed_transactions
+        
+        # Calculate throughput based on elapsed time since client started
+        throughput = self.completed_transactions / elapsed_time if elapsed_time > 0 else 0
+
+        print("-" * 40)
+        print(f"  Completed Transactions: {self.completed_transactions}")
+        print(f"  Elapsed Time: {elapsed_time:.2f} seconds")
+        print(f"  Throughput: {throughput:.2f} transactions/second")
+        print(f"  Average Latency: {average_latency:.2f} seconds")
+        print("-" * 40)
 
     def is_intra_shard_transaction(self, transaction):
         x, y, _ = transaction
@@ -156,14 +214,20 @@ class Client:
             print(f"{server_id}: ", end='')
             if committed_transactions:
                 for tx in committed_transactions:
-                    print(f"({tx[0]}, {tx[1]}, {tx[2]}) ")
+                    print(f"({tx[0]}, {tx[1]}, {tx[2]}) ", end='')
+                print()
             else:
                 print()
         print("-" * 40)
         
 def issue_transactions(client, transactions, cluster_to_servers):
+    time.sleep(10) # wait for servers to launch
     for t in transactions:
+        # Record transaction start time
         if client.is_intra_shard_transaction(t):
+            # Store using transaction tuple as key for non-2PC transactions
+            client.transaction_times[(t[0], t[1], t[2])] = time.time()
+            
             # issue RAFT transaction
             cluster = client.get_clusters(t)[0]
             receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
@@ -172,6 +236,9 @@ def issue_transactions(client, transactions, cluster_to_servers):
             # issue 2PC transaction
             client.transaction_id += 1
             tx_id = client.transaction_id
+            
+            # Store transaction start time
+            client.transaction_times[tx_id] = time.time()
             client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
 
             c_x, c_y = client.get_clusters(t)
@@ -182,7 +249,7 @@ def issue_transactions(client, transactions, cluster_to_servers):
             # message someone from y
             recv = cluster_to_servers[c_y][0] # lowest id in cluster
             client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
-        time.sleep(10)
+        time.sleep(5)
 
 def main():
     if len(sys.argv) < 2:
@@ -219,6 +286,7 @@ def main():
     "Commands:\n"
     "  - PrintBalance <account#> (pb <account#>)\n"
     "  - PrintDatastore (pd)\n"
+    "  - Performance (perf)\n"
 )
 
     transactions = []
@@ -229,7 +297,6 @@ def main():
                 x, y, amt = parts
                 transactions.append((int(x.strip()), int(y.strip()), int(amt)))
 
-    time.sleep(10) # wait for servers to launch
     transaction_thread = threading.Thread(target=issue_transactions, args=(client, transactions, cluster_to_servers))
     transaction_thread.daemon = True
     transaction_thread.start()
@@ -247,8 +314,7 @@ def main():
         elif command.startswith("PrintDatastore") or command.startswith('pd'):
             client.PrintDatastore()
         elif command.startswith("Performance") or command.startswith('perf'):
-            # display perf stats
-            pass
+            client.Performance()
 
 
 if __name__ == "__main__":

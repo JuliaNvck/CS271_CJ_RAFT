@@ -219,9 +219,9 @@ class Client:
             else:
                 print()
         print("-" * 40)
-        
+
 def issue_transactions(client, transactions, cluster_to_servers):
-    time.sleep(10) # wait for servers to launch
+    time.sleep(15) # wait for servers to launch
     for t in transactions:
         # Record transaction start time
         if client.is_intra_shard_transaction(t):
@@ -295,7 +295,7 @@ def main():
             parts = line.strip().split(",")
             if len(parts) == 3:
                 x, y, amt = parts
-                transactions.append((int(x.strip()), int(y.strip()), int(amt)))
+                transactions.append((int(x.strip()), int(y.strip()), int(amt.strip())))
 
     transaction_thread = threading.Thread(target=issue_transactions, args=(client, transactions, cluster_to_servers))
     transaction_thread.daemon = True

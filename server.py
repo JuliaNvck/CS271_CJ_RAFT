@@ -479,6 +479,19 @@ class Server:
             log_entry = self.log[i]
             print(f"i: {i}")
 
+            if log_entry.transaction:
+                # Handle the case where transaction is a dict instead of a Transaction object
+                # if transaction == None it should be skipped by "if i == decision_entry_index:""
+                if isinstance(log_entry.transaction, dict):
+                    sender=log_entry.transaction["sender"]
+                    receiver=log_entry.transaction["receiver"]
+                    amount=log_entry.transaction["amount"]
+                else:
+                    sender=log_entry.transaction.sender
+                    receiver=log_entry.transaction.receiver
+                    amount=log_entry.transaction.amount
+
+
             # 2PC Transaction: Skip execution if not yet committed
             if log_entry.is_2PC:
                 decision_entry_index, decision_entry = next(
@@ -492,18 +505,22 @@ class Server:
                 if decision_entry_index:
                     print(f"decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
                 
+                if i == decision_entry_index:
+                    print("SKIPPING")
+                    continue
+                
                 if not decision_entry:
                     print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
                     continue
                 if not decision_entry.committed_2PC:
                     print(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
                     # Unlock accounts and do NOT execute
-                    if self.shardManager.is_account_in_cluster(log_entry.transaction.sender):
-                        self.locks[log_entry.transaction.sender] = False
-                        print(f"Unlocked sender {log_entry.transaction.sender}")
-                    elif self.shardManager.is_account_in_cluster(log_entry.transaction.receiver):
-                        self.locks[log_entry.transaction.receiver] = False
-                        print(f"Unlocked receiver {log_entry.transaction.receiver}")
+                    if self.shardManager.is_account_in_cluster(sender):
+                        self.locks[sender] = False
+                        print(f"Unlocked sender {sender}")
+                    elif self.shardManager.is_account_in_cluster(receiver):
+                        self.locks[receiver] = False
+                        print(f"Unlocked receiver {receiver}")
                     continue
 
 
@@ -513,22 +530,8 @@ class Server:
             # elif log_entry.is_2PC and log_entry.committed_2PC:
             #     print(f"Executing committed 2PC transaction (tx_id: {log_entry.tx_id}).")
 
-            if log_entry.transaction:
-                # Handle the case where transaction is a dict instead of a Transaction object
-                if isinstance(log_entry.transaction, dict):
-                    transaction_data = log_entry.transaction
-                    transaction = Transaction(
-                        sender=transaction_data["sender"],
-                        receiver=transaction_data["receiver"],
-                        amount=transaction_data["amount"]
-                    )
-                else:
-                    transaction = log_entry.transaction
-
                 # transaction = log_entry.transaction # Get transaction from log
-                print(f"Applying transaction: {transaction}")
-                sender, receiver, amount = transaction.sender, transaction.receiver, transaction.amount
-                # disk write
+                print(f"Applying transaction: {(sender, receiver, amount)}")
                 self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
             # Update balances in data store

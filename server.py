@@ -358,6 +358,8 @@ class Server:
                 # For 2PC: vote No
                 vote = Vote(tx_id=tx_id, vote = "no").to_dict()
                 self.send_message(vote, self.coordinator_addr)
+            else:
+                self.send_message(ClientResponse(False, sender, receiver, amount).to_dict(), self.coordinator_addr)
             return
         
         if is_2PC:

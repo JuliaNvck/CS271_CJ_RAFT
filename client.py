@@ -172,7 +172,7 @@ class Client:
         for server_id in range(1, 10):
             log_file = f"shards/{server_id}_log.json"
             if not os.path.exists(log_file):
-                print(f"Server {server_id}: Log file not found.")
+                print(f"{server_id}: Log file not found.")
                 continue
 
             with open(log_file, "r") as file:

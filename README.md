@@ -28,12 +28,13 @@ The application supports transfer transactions in the form `(x, y, amt)`, where:
 - **Two-Phase Commit (2PC)**: Manages cross-shard transactions for atomicity.
 - **Locking Mechanism**: Implements lock tables to prevent concurrent updates to data items.
 - **Performance Metrics**: Measures throughput and latency of transactions.
+- **Efficient Communication**: Uses non-blocking UDP sockets to facilitate fast message delivery and reduced overhead.
 
 ---
 
 ## Implementation Details
 
-### 📂 Data Management
+### Data Management
 - **Dataset Size**: 3000 data items (`id` from 1 to 3000), evenly distributed across clusters.
 - **Shard Mapping**:
   - Cluster 1: Items 1 - 1000
@@ -41,7 +42,7 @@ The application supports transfer transactions in the form `(x, y, amt)`, where:
   - Cluster 3: Items 2001 - 3000
 - **Initial Balance**: All data items start with a balance of 10 units.
 
-### Functions
+### Client Functions
 
 #### 1. `PrintBalance <account_id>`
 - Displays the balance of a given client across all servers in the relevant cluster.
@@ -73,6 +74,11 @@ The application supports transfer transactions in the form `(x, y, amt)`, where:
    - If all clusters vote "yes", a commit message is broadcasted.
    - If any cluster votes "no" or fails, an abort message is sent.
 
+### UDP Socket Communication
+- **Non-blocking Communication**: The server and client use non-blocking UDP sockets (`socket.AF_INET`, `socket.SOCK_DGRAM`) for lightweight, fast, and connectionless message passing.
+- **Asynchronous Processing**: Threads handle message listening and transaction processing concurrently.
+- **Error Handling**: Implemented to handle timeouts, lost packets, and server failures gracefully.
+
 ---
 
 ## Testing and Test Cases
@@ -80,6 +86,7 @@ The application supports transfer transactions in the form `(x, y, amt)`, where:
 The system handles a variety of scenarios, including:
 - Independent intra-shard and cross-shard transactions.
 - Transactions with overlapping data items.
+- Concurrent Transactions (both intra-shard and cross-shard)
 - Failures and timeout scenarios in the 2PC protocol.
 - No consensus when too many servers fail.
 

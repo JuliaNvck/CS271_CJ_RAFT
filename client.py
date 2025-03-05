@@ -220,16 +220,23 @@ class Client:
                 print()
         print("-" * 40)
 
-def issue_transaction(client, trans, cluster_to_servers):
+def issue_transaction(client, t, cluster_to_servers):
+    if t[0] not in range(0, 3001):
+        print(f"Account {t[0]} not found. Skipping: {t}")
+        return
+    if t[1] not in range(0, 3001):
+        print(f"Account {t[1]} not found. Skipping: {t}")
+        return
+
     # Record transaction start time
-    if client.is_intra_shard_transaction(trans):
+    if client.is_intra_shard_transaction(t):
         # Store using transaction tuple as key for non-2PC transactions
-        client.transaction_times[(trans[0], trans[1], trans[2])] = time.time()
+        client.transaction_times[(t[0], t[1], t[2])] = time.time()
         
         # issue RAFT transaction
-        cluster = client.get_clusters(trans)[0]
+        cluster = client.get_clusters(t)[0]
         receiver = cluster_to_servers[cluster][0] # lowest ID in cluster
-        client.messenger.send_message(ClientRequest(trans[0], trans[1], trans[2]), receiver['addr'])
+        client.messenger.send_message(ClientRequest(t[0], t[1], t[2]), receiver['addr'])
     else:
         # issue 2PC transaction
         client.transaction_id += 1
@@ -237,16 +244,16 @@ def issue_transaction(client, trans, cluster_to_servers):
         
         # Store transaction start time
         client.transaction_times[tx_id] = time.time()
-        client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": trans}
+        client.pending_transactions[tx_id] = {"votes": {}, "acks": {}, "transaction": t}
 
-        c_x, c_y = client.get_clusters(trans)
+        c_x, c_y = client.get_clusters(t)
         # message someone from x
         recv = cluster_to_servers[c_x][0] # lowest id in cluster
-        client.messenger.send_message(Prepare(tx_id=tx_id, data=trans), recv['addr'])
+        client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
 
         # message someone from y
         recv = cluster_to_servers[c_y][0] # lowest id in cluster
-        client.messenger.send_message(Prepare(tx_id=tx_id, data=trans), recv['addr'])
+        client.messenger.send_message(Prepare(tx_id=tx_id, data=t), recv['addr'])
 
 def main():
     if len(sys.argv) < 2:

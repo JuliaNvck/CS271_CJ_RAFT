@@ -229,6 +229,7 @@ def issue_transaction(client, t, cluster_to_servers):
         return
 
     # Record transaction start time
+    print(f"Issuing: {t}")
     if client.is_intra_shard_transaction(t):
         # Store using transaction tuple as key for non-2PC transactions
         client.transaction_times[(t[0], t[1], t[2])] = time.time()

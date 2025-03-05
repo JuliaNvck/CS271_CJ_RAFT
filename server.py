@@ -12,6 +12,7 @@ from shard_manager import ShardManager
 from log_entry import LogEntry
 from transaction import Transaction
 
+DECISION_TIMEOUT = 3
 HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (1, 10) # seconds
 TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
@@ -68,6 +69,35 @@ class Server:
         self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
         # Tracks which accounts are locked
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
+        
+        self.pending_decisions = {}  # Track pending 2PC transactions {tx_id: (timestamp, transaction)}
+        threading.Thread(target=self.check_pending_decisions, daemon=True).start()
+
+    def check_pending_decisions(self):
+        while True:
+            current_time = time.time()
+            if self.pending_decisions:
+                for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
+                    if current_time - start_time > DECISION_TIMEOUT:
+                        print(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
+                        self.release_locks_for_transaction(tx_id)
+                        ack_message = Ack(tx_id=tx_id).to_dict()
+                        self.send_message(ack_message, self.coordinator_addr)
+            time.sleep(0.1)
+
+    def release_locks_for_transaction(self, tx_id):
+        _, transaction = self.pending_decisions.get(tx_id, (None, None))
+        if transaction:
+            sender = transaction[0]
+            receiver = transaction[1]
+            if self.shardManager.is_account_in_cluster(sender):
+                self.locks[sender] = False
+                print(f"Released lock on sender {sender} for transaction {tx_id}.")
+            if self.shardManager.is_account_in_cluster(receiver):
+                self.locks[receiver] = False
+                print(f"Released lock on receiver {receiver} for transaction {tx_id}.")
+        if tx_id in self.pending_decisions:
+            del self.pending_decisions[tx_id]
     
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
@@ -234,8 +264,10 @@ class Server:
             if is_2PC and transaction is not None:
                 if self.shardManager.is_account_in_cluster(sender):
                     self.locks[sender] = True
+                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
                 elif self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = True
+                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
             elif not is_2PC:
                 self.locks[sender] = True
                 self.locks[receiver] = True
@@ -397,9 +429,11 @@ class Server:
             if self.shardManager.is_account_in_cluster(sender):
                 # lock sender
                 self.locks[sender] = True
+                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
             elif self.shardManager.is_account_in_cluster(receiver):
                 # lock receiver
                 self.locks[receiver] = True
+                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
 
         # Create log entry and execute RAFT to replicate
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
@@ -621,7 +655,7 @@ class Server:
 
          # Find the corresponding log entry
         for log_entry in self.log:
-            if log_entry.is_2PC and log_entry.tx_id == tx_id and log_entry.transaction:
+            if log_entry.is_2PC and log_entry.tx_id == tx_id and log_entry.transaction and tx_id in self.pending_decisions:
                 # Append a decision log entry for COMMIT or ABORT
                 decision_entry = LogEntry(
                     term=self.current_term,
@@ -634,6 +668,7 @@ class Server:
                 self.shardManager.append_to_log(decision_entry)
                 print(f"Appended {decision} log entry for tx_id {tx_id}")
                 print(f"log entry: {log_entry.to_dict()}")
+                del self.pending_decisions[tx_id]
                 self.commit_index = len(self.log) - 1 # FIXME: ??????
                 self.apply_committed_entries()
 
@@ -707,7 +742,7 @@ class Server:
     def send_message(self, message, receiver):
         serialized_message = json.dumps(message).encode('utf-8') 
         try:
-            time.sleep(0.2)
+            time.sleep(0.1)
             self.socket.sendto(serialized_message, receiver)  # send the message via UDP
             #print(f"[T] {self.SERVER_NAMES[receiver]}: {json.dumps(message, indent=2)}")
             msg_type = message.pop('msg_type', 'UNKNOWN')  # Extract 'msg_type' or default to 'UNKNOWN'
@@ -749,7 +784,7 @@ class Server:
         """Send a message to all servers (except oneself) in a cluster"""
 
         serialized_message = json.dumps(message).encode('utf-8')
-        time.sleep(0.2)
+        time.sleep(0.1)
         for server_info in self.cluster_to_servers[self.my_cluster]:
             try:
                 self.socket.sendto(serialized_message, server_info['addr'])

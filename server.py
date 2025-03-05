@@ -93,7 +93,7 @@ class Server:
                         self.release_locks_for_transaction(tx_id)
                         ack_message = Ack(tx_id=tx_id).to_dict()
                         self.send_message(ack_message, self.coordinator_addr)
-            time.sleep(0.1)
+            time.sleep(0.3)
 
     def release_locks_for_transaction(self, tx_id):
         _, transaction = self.pending_decisions.get(tx_id, (None, None))
@@ -569,22 +569,10 @@ class Server:
                         print(f"Unlocked receiver {receiver}")
                     continue
 
-
-            # if log_entry.is_2PC and not getattr(log_entry, "committed_2PC", False):
-            #     print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT decision.")
-            #     continue  # Wait until COMMIT message arrives
-            # elif log_entry.is_2PC and log_entry.committed_2PC:
-            #     print(f"Executing committed 2PC transaction (tx_id: {log_entry.tx_id}).")
-
             # transaction = log_entry.transaction # Get transaction from log
             print(f"Applying transaction: {(sender, receiver, amount)}")
             self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
-            # Update balances in data store
-            # self.data_store.setdefault(sender, 0)
-            # self.data_store.setdefault(receiver, 0)
-            # self.data_store[sender] -= amount
-            # self.data_store[receiver] += amount
             print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
             # Leader notifies client
@@ -613,26 +601,6 @@ class Server:
                 break
         
         self.last_applied = self.commit_index  # Update last applied index
-        
-            
-            # this breaks everything because we dont have access to both sender and recvr balances
-            # print(f"{self.my_address} Account Balances: sender {sender}: {self.shardManager.get_balance(sender)}, receiver {receiver}: {self.shardManager.get_balance(receiver)}")
-
-        #finally:
-            # print(f"Releasing locks for {sender} and/or {receiver}")
-            # self.locks[sender] = False
-            # self.locks[receiver] = False
-            # Unlock sender and receiver
-            # if not log_entry.is_2PC:
-            #     self.locks[sender] = False
-            #     self.locks[receiver] = False
-            # elif log_entry.is_2PC:
-            #     if self.shardManager.is_account_in_cluster(sender):
-            #         # unlock sender
-            #         self.locks[sender] = False
-            #     elif self.shardManager.is_account_in_cluster(receiver):
-            #         # unlock receiver
-            #         self.locks[receiver] = False
                     
 
     def handle_decision(self, message, addr):
@@ -644,24 +612,6 @@ class Server:
         if not tx_id:
             print("Error: Received COMMIT/ABORT message without tx_id. Ignoring.")
             return
-
-        # # Find the corresponding log entry
-        # for log_entry in self.log:
-        #     if log_entry.is_2PC and log_entry.tx_id == tx_id:
-        #         if decision == "COMMIT":
-        #             print(f"Cross-shard transaction COMMITTED: {log_entry.transaction}")
-        #             log_entry.committed_2PC = True
-        #             self.apply_committed_entries()  # Execute the transaction
-
-        #         else:  # "ABORT"
-        #             print(f"Cross-shard transaction ABORTED: {log_entry.transaction}")
-        #             # Unlock accounts on abort
-        #             if self.shardManager.is_account_in_cluster(log_entry.transaction.sender):
-        #                 self.locks[log_entry.transaction.sender] = False
-        #             elif self.shardManager.is_account_in_cluster(log_entry.transaction.receiver):
-        #                 self.locks[log_entry.transaction.receiver] = False
-
-        #         break
 
          # Find the corresponding log entry
         for log_entry in self.log:

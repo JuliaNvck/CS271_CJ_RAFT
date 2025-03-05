@@ -1,3 +1,4 @@
+import os
 import socket
 import threading
 import sys
@@ -56,9 +57,18 @@ class Server:
         self.current_term = 0
         self.current_leader = None
         self.voted_for = None
+
         self.log = []  # Transaction log
         self.commit_index = -1  # Index of highest log entry known to be committed
         self.last_applied = -1
+        if os.path.exists(f"shards/{server_id}_log.json"):
+            self.log, self.commit_index = self.shardManager.get_log()
+            self.last_applied = self.commit_index
+        # else
+        #   create new log file as normal
+        #   write over balance table
+        #   ^ these are both done in ShardManager.init()
+
         self.next_index = {} # Index of the next log entry to send to each follower
         self.match_index = {} # Index of the highest log entry known to be replicated on a server
         self.role = "follower"  # Initial state is follower

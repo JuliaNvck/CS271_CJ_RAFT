@@ -594,7 +594,7 @@ class Server:
         logger.info(f"applying entries up to index {self.commit_index}")
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
-            UPDATE_COMMIT_INDEX = True
+            UPDATE_LAST_APPLIED = True
             log_entry = self.log[i]
             logger.info(f"i: {i}")
 
@@ -630,7 +630,7 @@ class Server:
                 
                 if not decision_entry:
                     logger.info(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
-                    UPDATE_COMMIT_INDEX = False
+                    UPDATE_LAST_APPLIED = False
                     continue
                 if not decision_entry.committed_2PC:
                     logger.info(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
@@ -674,7 +674,7 @@ class Server:
             if log_entry.is_2PC and decision_entry_index == self.commit_index:
                 break
 
-        if UPDATE_COMMIT_INDEX:
+        if UPDATE_LAST_APPLIED:
             self.last_applied = self.commit_index  # Update last applied index
                     
 

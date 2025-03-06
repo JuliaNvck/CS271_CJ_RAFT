@@ -7,11 +7,33 @@ import json
 import time
 import random
 import queue
+import logging
+from datetime import datetime
 from messages import *
 from messages import Message
 from shard_manager import ShardManager
 from log_entry import LogEntry
 from transaction import Transaction
+
+# Custom formatter to truncate function names
+class TruncatingFormatter(logging.Formatter):
+    def format(self, record):
+        # Truncate the function name to 15 characters
+        record.funcName = record.funcName[:10].ljust(10)
+        return super().format(record)
+
+# Configure logging
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# Create a handler and set the custom formatter
+handler = logging.StreamHandler(sys.stdout)
+formatter = TruncatingFormatter(
+    fmt='[%(funcName)s] %(message)s',
+    datefmt='%M:%S'  # Minutes:Seconds
+)
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 DECISION_TIMEOUT = 8
 HEARTBEAT_INTERVAL = 3          # seconds
@@ -94,7 +116,7 @@ class Server:
                 if self.pending_decisions:
                     for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
                         if current_time - start_time > DECISION_TIMEOUT:
-                            print(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
+                            logger.info(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
                             self.release_locks_for_transaction(tx_id)
                             ack_message = Ack(tx_id=tx_id).to_dict()
                             self.send_message(ack_message, self.coordinator_addr)
@@ -108,10 +130,10 @@ class Server:
                 receiver = transaction[1]
                 if self.shardManager.is_account_in_cluster(sender):
                     self.locks[sender] = False
-                    print(f"Released lock on sender {sender} for transaction {tx_id}.")
+                    logger.info(f"Released lock on sender {sender} for transaction {tx_id}.")
                 if self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = False
-                    print(f"Released lock on receiver {receiver} for transaction {tx_id}.")
+                    logger.info(f"Released lock on receiver {receiver} for transaction {tx_id}.")
             if tx_id in self.pending_decisions:
                 del self.pending_decisions[tx_id]
     
@@ -124,7 +146,7 @@ class Server:
     def become_leader(self):
         """Transition to leader and start sending heartbeats."""
         self.role = "leader"
-        print(f"{self.SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
+        logger.info(f"{self.SERVER_NAMES[self.my_address]} is now the leader for term {self.current_term}")
         # update next_index for all followers
         for server_addr in self.SERVER_NAMES:
             self.next_index[server_addr] = len(self.log)
@@ -154,17 +176,17 @@ class Server:
             try:
                 data, addr = self.socket.recvfrom(4096)
                 response = json.loads(data.decode('utf-8'))
-                print(f"Received message type {response.get('msg_type')} from {addr}")
+                logger.info(f"Received message type {response.get('msg_type')} from {addr}")
 
                 # Step down if a higher term message is received
                 if response.get("term", 0) > self.current_term:
-                    # print(f"Received higher term {response.get('term')}, stepping down to follower.")
+                    # logger.info(f"Received higher term {response.get('term')}, stepping down to follower.")
                     self.step_down_to_follower(response.get("term"))
                     return  # Stop election process
                 
                 # AppendEntries RPC received from new leader: step down
                 if response.get("msg_type") == "APPEND_ENTRIES" and response.get("term", 0) >= self.current_term:
-                    print(f"Received AppendEntries RPC from {response.get('leader_id')}, stepping down to follower.")
+                    logger.info(f"Received AppendEntries RPC from {response.get('leader_id')}, stepping down to follower.")
                     self.step_down_to_follower(response.get("term"))
                     self.last_heartbeat = time.time()  # Reset election timeout
                     return  # Stop election process
@@ -199,13 +221,13 @@ class Server:
                 leader_commit=self.commit_index
                 ).to_dict()
             
-            print(f"HEARTBEAT")
+            logger.info(f"HEARTBEAT")
             self.clustercast(message, self.my_cluster)
             time.sleep(HEARTBEAT_INTERVAL)
             
             # If a higher term is received, leader should step down
             if self.role != "leader":
-                print("Stepping down from leader role, stopping heartbeats.")
+                logger.info("Stepping down from leader role, stopping heartbeats.")
                 break
 
     def handle_append_entries(self, message, addr):
@@ -218,7 +240,7 @@ class Server:
         leader_commit = message.get("leader_commit", -1)
 
         if len(entries) == 0:
-            print(f"HEARTBEAT from {leader_id} for term {term}")
+            logger.info(f"HEARTBEAT from {leader_id} for term {term}")
 
         if prev_log_index is None:
             prev_log_index = -1
@@ -227,7 +249,7 @@ class Server:
 
         # Reject if term < current term
         if term < self.current_term:
-            print(f"Received outdated RPC from leader {leader_id} for term (term {term} < {self.current_term}), ignoring.")
+            logger.info(f"Received outdated RPC from leader {leader_id} for term (term {term} < {self.current_term}), ignoring.")
             return
 
         # Step down if term is higher
@@ -241,12 +263,12 @@ class Server:
         # Update known leader on heartbeat
         if self.role == "follower":
             self.current_leader = tuple(leader_id)
-            # print(f"Updated current leader to {leader_id}")
+            # logger.info(f"Updated current leader to {leader_id}")
 
-       # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match
+        # Reject if log doesn’t contain an entry at prev_log_index or term doesn't match
         # FIXME: Check if prev_log_index is -1????    
         if (prev_log_index != -1) and (prev_log_index >= len(self.log) or self.log[prev_log_index].term != prev_log_term):
-            print(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
+            logger.info(f"Log mismatch at index {prev_log_index}, rejecting AppendEntries from {leader_id}")
             # FIXME: unlock accounts???
             response = AppendAck(success=False).to_dict()
             self.send_message(response, addr)
@@ -255,7 +277,7 @@ class Server:
         # If existing entries conflict with new entries, delete all existing entries starting with first conflicting entry
         if prev_log_index + 1 < len(self.log): # there are conflicting entries
             self.log = self.log[:prev_log_index + 1] # delete conflicting entries
-            print(f"DELETING LOG ENTIRES: 0-{prev_log_index+1}!")
+            logger.info(f"DELETING LOG ENTIRES: 0-{prev_log_index+1}!")
             self.shardManager.truncate_log(prev_log_index+1)
 
         # Append any new entries not in log
@@ -265,8 +287,8 @@ class Server:
             if transaction is not None:
                 sender = transaction["sender"]
                 receiver = transaction["receiver"]
-                print(f"sender: {sender}, receiver: {receiver}")
-                print(f"entry: {entry}")
+                logger.info(f"sender: {sender}, receiver: {receiver}")
+                logger.info(f"entry: {entry}")
                 
             tx_id = entry.get("tx_id")  # Extract tx_id safely
             committed_2PC = entry.get("committed_2PC", False)
@@ -281,15 +303,15 @@ class Server:
                 if self.shardManager.is_account_in_cluster(sender):
                     self.locks[sender] = True
                     with self.pending_decisions_lock:
-                        print(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                        logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
                         self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
-                        print(f"pending_decisions: {self.pending_decisions}")
+                        logger.info(f"pending_decisions: {self.pending_decisions}")
                 elif self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = True
                     with self.pending_decisions_lock:
-                        print(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                        logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
                         self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
-                        print(f"pending_decisions: {self.pending_decisions}")
+                        logger.info(f"pending_decisions: {self.pending_decisions}")
             elif not is_2PC:
                 self.locks[sender] = True
                 self.locks[receiver] = True
@@ -297,7 +319,7 @@ class Server:
             e = LogEntry(term=entry["term"], transaction=transaction, is_2PC=is_2PC, tx_id=tx_id, committed_2PC=committed_2PC)
             self.shardManager.append_to_log(e)
             self.log.append(e)
-            print(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
+            logger.info(f"Appended new log entry from leader {leader_id}: term: {term}, {entry['transaction']}")
 
         # Update commit index
         if leader_commit > self.commit_index:
@@ -311,7 +333,7 @@ class Server:
         response = AppendAck(success=True).to_dict()
         self.send_message(response, addr)
 
-        print(f"commit index: {self.commit_index}")
+        logger.info(f"commit index: {self.commit_index}")
                 
     def handle_vote_request(self, message, addr):
         """Handle incoming RequestVote RPC."""
@@ -333,40 +355,40 @@ class Server:
         
         # Reject vote if already voted in this term
         if self.voted_for is not None:
-            print(f"Already voted for {self.voted_for} in term {self.current_term}, rejecting {candidate_id}")
+            logger.info(f"Already voted for {self.voted_for} in term {self.current_term}, rejecting {candidate_id}")
             return
         
         # Reject if candidate's log is less complete
         my_last_log_index = len(self.log) - 1
         my_last_log_term = self.log[-1].term if self.log else 0
         if (last_log_term < my_last_log_term) or (last_log_term == my_last_log_term and last_log_index < my_last_log_index):
-            print(f"Rejecting vote request from {candidate_id} (outdated log).")
+            logger.info(f"Rejecting vote request from {candidate_id} (outdated log).")
             return
 
         # Grant vote
         self.voted_for = candidate_id
         response = VoteResponse(term=self.current_term, vote_granted=True).to_dict()
         self.send_message(response, addr)
-        print(f"Voted for {candidate_id} in term {term}")
+        logger.info(f"Voted for {candidate_id} in term {term}")
 
     def enqueue_transaction(self, message, addr):
         """Adds a transaction request to the queue."""
         # Add transaction to queue
         self.transaction_queue.put((message, addr, False))  # False for is_2PC transaction
-        print(f"[{self.my_address}] Successfully added transaction to queue: {message}")
+        logger.info(f"[{self.my_address}] Successfully added transaction to queue: {message}")
 
     def enqueue_cross_shard_transaction(self, message, addr):
         """Enqueue cross-shard transactions for 2PC handling."""
         # Add transaction to queue
         self.transaction_queue.put((message, addr, True))  # True for is_2PC transaction
-        print(f"[{self.my_address}] Enqueued cross-shard transaction: {message}")
+        logger.info(f"[{self.my_address}] Enqueued cross-shard transaction: {message}")
     
     def process_transaction_queue(self):
         """Continuously processes transactions from the queue."""
         while True:
             try:
                 message, addr, is_2PC = self.transaction_queue.get()  # get next transaction and dequeue
-                print(f"[{self.my_address}] Processing transaction from queue: {message}")
+                logger.info(f"[{self.my_address}] Processing transaction from queue: {message}")
                 self.process_transaction(message, addr, is_2PC)  # Process transaction normally
             finally:
                 self.transaction_queue.task_done()
@@ -379,10 +401,10 @@ class Server:
         else:
             # Forward request to leader
             if self.current_leader:
-                print(f"Redirecting client request to leader at {self.current_leader}")
+                logger.info(f"Redirecting client request to leader at {self.current_leader}")
                 self.send_message(message, self.current_leader)
             else:
-                print("Error: No known leader to forward request.")
+                logger.info("Error: No known leader to forward request.")
 
     def handle_prepare(self, message, addr):
         if self.role == "leader":
@@ -391,10 +413,10 @@ class Server:
         else:
             # Forward request to leader
             if self.current_leader:
-                print(f"Redirecting client request to leader at {self.current_leader}")
+                logger.info(f"Redirecting client request to leader at {self.current_leader}")
                 self.send_message(message, self.current_leader)
             else:
-                print("Error: No known leader to forward request.")
+                logger.info("Error: No known leader to forward request.")
 
     def process_transaction(self, message, addr, is_2PC):
         """Processes a single transaction request."""
@@ -403,11 +425,11 @@ class Server:
         receiver = int(message.get("receiver"))
         amount = int(message.get("amount"))
         tx_id = message.get("tx_id")
-        print(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
+        logger.info(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
         
         # Check if sender has sufficient balance
         if self.shardManager.is_account_in_cluster(sender) and self.shardManager.get_balance(sender) < amount:
-            print(f"Transaction rejected: {sender} has insufficient balance.")
+            logger.info(f"Transaction rejected: {sender} has insufficient balance.")
             if is_2PC:
                 # For 2PC: vote No
                 vote = Vote(tx_id=tx_id, vote = "no").to_dict()
@@ -421,7 +443,7 @@ class Server:
                 # sender shard
                 if self.locks[sender]:
                     # account locked: abort
-                    print(f"Transaction rejected: {sender} account locked.")
+                    logger.info(f"Transaction rejected: {sender} account locked.")
                     vote = Vote(tx_id=tx_id, vote = "no").to_dict()
                     self.send_message(vote, self.coordinator_addr)
                     return
@@ -429,7 +451,7 @@ class Server:
                 # receiver shard
                 if self.locks[receiver]:
                     # account locked: abort
-                    print(f"Transaction rejected: {receiver} account locked.")
+                    logger.info(f"Transaction rejected: {receiver} account locked.")
                     vote = Vote(tx_id=tx_id, vote = "no").to_dict()
                     self.send_message(vote, self.coordinator_addr)
                     return
@@ -437,9 +459,9 @@ class Server:
             # Wait until both accounts are unlocked
             start_time = time.time()
             while self.locks[sender] or self.locks[receiver]:
-                print(f"Waiting for {sender} and {receiver} to unlock...")
+                logger.info(f"Waiting for {sender} and {receiver} to unlock...")
                 if time.time() - start_time > TRANSACTION_TIMEOUT:
-                    print(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
+                    logger.info(f"Transaction rejected: Timeout while waiting for {sender} or {receiver} to unlock.")
                     return  # Abort the transaction
                 time.sleep(0.1)  # Short delay
         
@@ -460,7 +482,7 @@ class Server:
         new_log_entry = LogEntry(term=self.current_term, transaction=transaction, is_2PC=is_2PC, tx_id=tx_id)
         self.log.append(new_log_entry)  # Append to leader log
         self.shardManager.append_to_log(new_log_entry)
-        print(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
+        logger.info(f"Leader {self.my_address} appended new log entry: {transaction.__dict__}")
 
         # Send AppendEntries to all followers
         self.replicate_log()
@@ -478,24 +500,24 @@ class Server:
     #         try:
     #             data, addr = self.socket.recvfrom(4096)
     #             response = json.loads(data.decode('utf-8'))
-    #             print(f"Received message from {addr}: {response}")
+    #             logger.info(f"Received message from {addr}: {response}")
 
     #             if response.get("msg_type") == "APPEND_ACK":
     #                 if response.get("success"):
-    #                     print(f"Received ACK from {addr}")
+    #                     logger.info(f"Received ACK from {addr}")
     #                     acks_received += 1
     #                     self.next_index[addr] = len(self.log)  # Move next_index forward
     #                     self.match_index[addr] = self.next_index[addr] - 1
-    #                     # print(f"Match index for {addr}: {self.match_index[addr]}")
-    #                     # print(f"Next index for {addr}: {self.next_index[addr]}")
+    #                     # logger.info(f"Match index for {addr}: {self.match_index[addr]}")
+    #                     # logger.info(f"Next index for {addr}: {self.next_index[addr]}")
 
     #                     # If a majority has replicated, update commit index
     #                     if acks_received > 1:
-    #                         print(f"Majority reached with {acks_received} ACKs")
+    #                         logger.info(f"Majority reached with {acks_received} ACKs")
     #                         self.update_commit_index()
     #                         return
     #                 else:
-    #                     print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
+    #                     logger.info(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
     #                     self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
     #                     self.replicate_log()
     #                     return
@@ -516,7 +538,7 @@ class Server:
         while time.time() - start_time < 10:  # Wait for responses
             try:
                 message, addr = self.append_ack_queue.get(timeout=1)
-                print(f"Replication mode: Received APPEND_ACK from {addr}: {message}")
+                logger.info(f"Replication mode: Received APPEND_ACK from {addr}: {message}")
 
                 if message.get("success"):
                     self.next_index[addr] = len(self.log)
@@ -524,17 +546,17 @@ class Server:
 
                     match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
                     if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
-                        print(f"Majority of {match_count} reached, updating commit index.")
+                        logger.info(f"Majority of {match_count} reached, updating commit index.")
                         self.update_commit_index()
                         break
 
                 else:
-                    print(f"Log inconsistency with {addr}, retrying...")
+                    logger.info(f"Log inconsistency with {addr}, retrying...")
                     self.next_index[addr] = max(0, self.next_index[addr] - 1)
                     self.send_append_entries(addr)
 
             except queue.Empty:
-                print("Timeout waiting for APPEND_ACKs")
+                logger.info("Timeout waiting for APPEND_ACKs")
                 break
 
         self.replication_mode = False  # Exit replication mode
@@ -548,33 +570,33 @@ class Server:
             # If a majority of servers have this entry and it's from the current term, commit it
             if match_count > 0 and self.log[index].term == self.current_term:
                 self.commit_index = index
-                print(f"{self.my_address} updated commit index to {self.commit_index}")
+                logger.info(f"{self.my_address} updated commit index to {self.commit_index}")
 
                 log_entry = self.log[index]
                 # If this is a 2PC transaction, send "VOTE YES" now (after replication but before execution)
                 if log_entry.is_2PC and log_entry.tx_id:
                     with self.pending_decisions_lock:
-                        print(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
+                        logger.info(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
                         self.pending_decisions[log_entry.tx_id] = (time.time(), [log_entry.transaction.sender, log_entry.transaction.receiver])
-                        print(f"pending_decisions: {self.pending_decisions}")
+                        logger.info(f"pending_decisions: {self.pending_decisions}")
                         
                     vote = Vote(tx_id=log_entry.tx_id, vote="yes").to_dict()
-                    print(f"Sending VOTE YES for cross-shard transaction: {log_entry.transaction}")
+                    logger.info(f"Sending VOTE YES for cross-shard transaction: {log_entry.transaction}")
                     self.send_message(vote, self.coordinator_addr)
                     # Don't execute yet, wait for commit/abort decision
                     return
-                print(f"{self.my_address} committed log entries up to index {self.commit_index}")
+                logger.info(f"{self.my_address} committed log entries up to index {self.commit_index}")
                 self.apply_committed_entries()
                 return
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
-        print(f"{self.my_address} applying entries up to index {self.commit_index}")
-        #try:
+        logger.info(f"applying entries up to index {self.commit_index}")
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
+            UPDATE_COMMIT_INDEX = True
             log_entry = self.log[i]
-            print(f"i: {i}")
+            logger.info(f"i: {i}")
 
             if log_entry.transaction:
                 # Handle the case where transaction is a dict instead of a Transaction object
@@ -600,31 +622,32 @@ class Server:
                     (None, None)
                 )
                 if decision_entry_index:
-                    print(f"decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
+                    logger.info(f"decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
                 
                 if i == decision_entry_index:
-                    print("SKIPPING")
+                    logger.info("SKIPPING")
                     continue
                 
                 if not decision_entry:
-                    print(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
+                    logger.info(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
+                    UPDATE_COMMIT_INDEX = False
                     continue
                 if not decision_entry.committed_2PC:
-                    print(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
+                    logger.info(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
                     # Unlock accounts and do NOT execute
                     if self.shardManager.is_account_in_cluster(sender):
                         self.locks[sender] = False
-                        print(f"Unlocked sender {sender}")
+                        logger.info(f"Unlocked sender {sender}")
                     elif self.shardManager.is_account_in_cluster(receiver):
                         self.locks[receiver] = False
-                        print(f"Unlocked receiver {receiver}")
+                        logger.info(f"Unlocked receiver {receiver}")
                     continue
 
             # transaction = log_entry.transaction # Get transaction from log
-            print(f"Applying transaction: {(sender, receiver, amount)}")
+            logger.info(f"Applying transaction: {(sender, receiver, amount)}")
             self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
-            print(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+            logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
             # Leader notifies client
             if not log_entry.is_2PC:
@@ -633,25 +656,26 @@ class Server:
                     self.send_message(vars(response), self.coordinator_addr)
             
             # Unlock sender and receiver
-            print(f"i: {i}, log[i]: {self.log[i]}")
+            logger.info(f"i: {i}, log[i]: {self.log[i]}")
             if not log_entry.is_2PC:
                 self.locks[sender] = False
                 self.locks[receiver] = False
-                print(f"Unlocked sender {sender} and receiver {receiver}")
+                logger.info(f"Unlocked sender {sender} and receiver {receiver}")
             elif log_entry.is_2PC:
                 if self.shardManager.is_account_in_cluster(sender):
                     # unlock sender
                     self.locks[sender] = False
-                    print(f"Unlocked sender {sender}")
+                    logger.info(f"Unlocked sender {sender}")
                 elif self.shardManager.is_account_in_cluster(receiver):
                     # unlock receiver
                     self.locks[receiver] = False
-                    print(f"Unlocked receiver {receiver}")
+                    logger.info(f"Unlocked receiver {receiver}")
             
             if log_entry.is_2PC and decision_entry_index == self.commit_index:
                 break
-        
-        self.last_applied = self.commit_index  # Update last applied index
+
+        if UPDATE_COMMIT_INDEX:
+            self.last_applied = self.commit_index  # Update last applied index
                     
 
     def handle_decision(self, message, addr):
@@ -659,16 +683,17 @@ class Server:
         tx_id = message.get("tx_id")
         decision = message.get("msg_type")  # Either "COMMIT" or "ABORT"
 
-        print(f"Received {decision} decision for cross-shard transaction with tx_id: {tx_id}")
+        logger.info(f"Received {decision} decision for cross-shard transaction with tx_id: {tx_id}")
         if not tx_id:
-            print("Error: Received COMMIT/ABORT message without tx_id. Ignoring.")
+            logger.info("Error: Received COMMIT/ABORT message without tx_id. Ignoring.")
             return
 
-         # Find the corresponding log entry
+        # Find the corresponding log entry]
+        logger.info("Finding the corresponding log entry...")
         for log_entry in self.log:
-            print(f"log_entry : {log_entry.to_dict()}")
-            print(f"tx_id {tx_id} in self.pending_decisions : {log_entry.tx_id in self.pending_decisions}")
-            print(f"self.pending_decisions: {self.pending_decisions}")
+            logger.info(f"log_entry : {log_entry.to_dict()}")
+            logger.info(f"tx_id {tx_id} in self.pending_decisions : {log_entry.tx_id in self.pending_decisions}")
+            logger.info(f"self.pending_decisions: {self.pending_decisions}")
             if log_entry.is_2PC and log_entry.tx_id == tx_id and log_entry.transaction:
                 # Append a decision log entry for COMMIT or ABORT
                 decision_entry = LogEntry(
@@ -680,10 +705,10 @@ class Server:
                 )
                 self.log.append(decision_entry)
                 self.shardManager.append_to_log(decision_entry)
-                print(f"Appended {decision} log entry for tx_id {tx_id}")
-                print(f"log entry: {log_entry.to_dict()}")
-                print(f"self.pending_decisions_lock: {self.pending_decisions_lock}")
-                print(f"self.pending_decisions: {self.pending_decisions}")
+                logger.info(f"Appended {decision} log entry for tx_id {tx_id}")
+                #logger.info(f"log entry: {log_entry.to_dict()}")
+                logger.info(f"self.pending_decisions_lock: {self.pending_decisions_lock}")
+                logger.info(f"self.pending_decisions: {self.pending_decisions}")
                 with self.pending_decisions_lock:
                     del self.pending_decisions[tx_id]
                 self.commit_index = len(self.log) - 1 # FIXME: ??????
@@ -699,12 +724,12 @@ class Server:
         success = message.get("success", False)
 
         if self.replication_mode:
-            print(f"Replication mode active: Queueing APPEND_ACK from {addr}")
+            logger.info(f"Replication mode active: Queueing APPEND_ACK from {addr}")
             self.append_ack_queue.put((message, addr))
             return
 
         if success:
-            print(f"Log repair: Received successful APPEND_ACK from {addr}")
+            logger.info(f"Log repair: Received successful APPEND_ACK from {addr}")
             self.next_index[addr] = len(self.log)
             self.match_index[addr] = self.next_index[addr] - 1
             # Check for majority replication and update commit index if applicable
@@ -712,7 +737,7 @@ class Server:
             if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
                 self.update_commit_index()
         else:
-            print(f"Log repair: Log inconsistency detected with {addr}, initiating repair...")
+            logger.info(f"Log repair: Log inconsistency detected with {addr}, initiating repair...")
             self.next_index[addr] = max(0, self.next_index[addr] - 1)
             self.send_append_entries(addr)
 
@@ -722,12 +747,12 @@ class Server:
     #     success = message.get("success", False)
 
     #     if success:
-    #         print(f"Received successful APPEND_ACK from {addr}")
+    #         logger.info(f"Received successful APPEND_ACK from {addr}")
     #         # Move next index forward and update match index
     #         self.next_index[addr] = len(self.log)
     #         self.match_index[addr] = self.next_index[addr] - 1
-    #         print(f"Match index for {addr}: {self.match_index[addr]}")
-    #         print(f"Next index for {addr}: {self.next_index[addr]}")
+    #         logger.info(f"Match index for {addr}: {self.match_index[addr]}")
+    #         logger.info(f"Next index for {addr}: {self.next_index[addr]}")
 
     #         # Check for majority replication and update commit index if applicable
     #         match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
@@ -735,7 +760,7 @@ class Server:
     #             self.update_commit_index()
 
     #     else:
-    #         print(f"Log inconsistency detected with {addr}, initiating log repair...")
+    #         logger.info(f"Log inconsistency detected with {addr}, initiating log repair...")
     #         # Decrement next index and retry log replication
     #         self.next_index[addr] = max(0, self.next_index[addr] - 1)
     #         self.send_append_entries(addr)
@@ -743,7 +768,7 @@ class Server:
     
     def listen(self):
         # Listen for incoming UDP messages
-        print(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
+        logger.info(f"Listening on {self.my_address[0]}:{self.my_address[1]}")
         while self.running:
             try:
                 # set timeout to periodically check running flag
@@ -753,7 +778,7 @@ class Server:
 
                 msg_type = message_data.get("msg_type")
                 
-                print(f"{RED}[R]{RESET} {self.SERVER_NAMES[addr]} {msg_type}")
+                logger.info(f"{RED}[R]{RESET} {self.SERVER_NAMES[addr]} {msg_type}")
 
                 # RAFT message handling
                 if msg_type == "APPEND_ENTRIES":
@@ -783,7 +808,7 @@ class Server:
         time.sleep(0.1)
         self.socket.sendto(serialized_message, receiver)
         msg_type = message.get('msg_type', 'UNKNOWN')
-        print(f"[T] {server_name} {msg_type}\n{json.dumps(message, indent=2)}")
+        logger.info(f"[T] {server_name} {msg_type}\n{json.dumps(message, indent=2)}")
 
     def send_message(self, message, receiver):
         serialized_message = json.dumps(message).encode('utf-8')
@@ -821,7 +846,7 @@ class Server:
         ).to_dict()
 
         self.send_message(message, addr)
-        print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
+        logger.info(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
     
     def run(self):
         threading.Thread(target=self.listen, daemon=True).start()
@@ -832,8 +857,8 @@ class Server:
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python3 server.py <my_port> <cluster>")
-        print("Example: python3 server.py 5000 1")
+        logger.info("Usage: python3 server.py <my_port> <cluster>")
+        logger.info("Example: python3 server.py 5000 1")
         sys.exit(1)
 
     with open("config.json", "r") as f:

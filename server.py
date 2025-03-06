@@ -693,10 +693,9 @@ class Server:
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
         logger.info(f"applying entries up to index {self.commit_index}")
-        UPDATE_COMMIT_INDEX = False
+        UPDATE_LAST_APPLIED = True
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
-            UPDATE_LAST_APPLIED = True
             log_entry = self.log[i]
             logger.info(f"i: {i}")
 

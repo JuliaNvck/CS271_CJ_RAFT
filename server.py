@@ -726,7 +726,6 @@ class Server:
         UPDATE_LAST_APPLIED = False
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
-            UPDATE_LAST_APPLIED = True
             log_entry = self.log[i]
             logger.info(f"i: {i}")
 

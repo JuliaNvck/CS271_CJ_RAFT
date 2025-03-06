@@ -106,36 +106,62 @@ class Server:
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
         
         self.pending_decisions = {}  # Track pending 2PC transactions {tx_id: (timestamp, transaction)}
-        self.pending_decisions_lock = threading.Lock()  # To prevent race conditions
+        # self.pending_decisions_lock = threading.Lock()  # To prevent race conditions
         threading.Thread(target=self.check_pending_decisions, daemon=True).start()
+
+    # def check_pending_decisions(self):
+    #     while True:
+    #         current_time = time.time()
+    #         with self.pending_decisions_lock:
+    #             if self.pending_decisions:
+    #                 for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
+    #                     if current_time - start_time > DECISION_TIMEOUT:
+    #                         logger.info(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
+    #                         self.release_locks_for_transaction(tx_id)
+    #                         ack_message = Ack(tx_id=tx_id).to_dict()
+    #                         self.send_message(ack_message, self.coordinator_addr)
+    #             time.sleep(0.3)
 
     def check_pending_decisions(self):
         while True:
             current_time = time.time()
-            with self.pending_decisions_lock:
-                if self.pending_decisions:
-                    for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
-                        if current_time - start_time > DECISION_TIMEOUT:
-                            logger.info(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
-                            self.release_locks_for_transaction(tx_id)
-                            ack_message = Ack(tx_id=tx_id).to_dict()
-                            self.send_message(ack_message, self.coordinator_addr)
-                time.sleep(0.3)
+            for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
+                if current_time - start_time > DECISION_TIMEOUT:
+                    self.release_locks_for_transaction(tx_id)
+                    ack_message = Ack(tx_id=tx_id).to_dict()
+                    self.send_message(ack_message, self.coordinator_addr)
+            time.sleep(0.3)
 
+    # def release_locks_for_transaction(self, tx_id):
+    #     with self.pending_decisions_lock:
+    #         _, transaction = self.pending_decisions.get(tx_id, (None, None))
+    #         if transaction:
+    #             sender = transaction[0]
+    #             receiver = transaction[1]
+    #             if self.shardManager.is_account_in_cluster(sender):
+    #                 self.locks[sender] = False
+    #                 logger.info(f"Released lock on sender {sender} for transaction {tx_id}.")
+    #             if self.shardManager.is_account_in_cluster(receiver):
+    #                 self.locks[receiver] = False
+    #                 logger.info(f"Released lock on receiver {receiver} for transaction {tx_id}.")
+    #         if tx_id in self.pending_decisions:
+    #             del self.pending_decisions[tx_id]
+    
     def release_locks_for_transaction(self, tx_id):
-        with self.pending_decisions_lock:
-            _, transaction = self.pending_decisions.get(tx_id, (None, None))
-            if transaction:
-                sender = transaction[0]
-                receiver = transaction[1]
-                if self.shardManager.is_account_in_cluster(sender):
-                    self.locks[sender] = False
-                    logger.info(f"Released lock on sender {sender} for transaction {tx_id}.")
-                if self.shardManager.is_account_in_cluster(receiver):
-                    self.locks[receiver] = False
-                    logger.info(f"Released lock on receiver {receiver} for transaction {tx_id}.")
-            if tx_id in self.pending_decisions:
-                del self.pending_decisions[tx_id]
+        # transaction = self.pending_decisions.get(tx_id)
+        transaction = self.pending_decisions.get(tx_id, (None, None))
+        if transaction and transaction[1]:
+            sender, receiver = transaction[1]
+        if transaction:
+            sender = transaction[0]
+            receiver = transaction[1]
+            if self.shardManager.is_account_in_cluster(sender):
+                self.locks[sender] = False
+                logger.info(f"Released lock on sender {sender} for transaction {tx_id}.")
+            if self.shardManager.is_account_in_cluster(receiver):
+                self.locks[receiver] = False
+                logger.info(f"Released lock on receiver {receiver} for transaction {tx_id}.")
+            self.pending_decisions.pop(tx_id, None)
     
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
@@ -323,6 +349,16 @@ class Server:
             # self.locks.setdefault(sender, False)
             # self.locks.setdefault(receiver, False)
             if is_2PC and transaction is not None:
+                if self.shardManager.is_account_in_cluster(sender):
+                    self.locks[sender] = True
+                    logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                    logger.info(f"pending_decisions: {self.pending_decisions}")
+                elif self.shardManager.is_account_in_cluster(receiver):
+                    self.locks[receiver] = True
+                    logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                    logger.info(f"pending_decisions: {self.pending_decisions}")
                 # if self.shardManager.is_account_in_cluster(sender):
                 #     self.locks[sender] = True
                 #     with self.pending_decisions_lock:
@@ -335,31 +371,31 @@ class Server:
                 #         logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
                 #         self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
                 #         logger.info(f"pending_decisions: {self.pending_decisions}")
-                logger.info(f"Trying to lock accounts {sender} and {receiver} for tx_id {tx_id}.")
-                retry_count = 0
-                while retry_count < 50:
-                    if self.pending_decisions_lock.acquire(timeout=0.1):
-                        try:
-                            if self.shardManager.is_account_in_cluster(sender):
-                                self.locks[sender] = True
-                                logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
-                                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
-                                logger.info(f"pending_decisions: {self.pending_decisions}")
-                            elif self.shardManager.is_account_in_cluster(receiver):
-                                self.locks[receiver] = True
-                                logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
-                                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
-                                logger.info(f"pending_decisions: {self.pending_decisions}")
-                            break
-                        finally:
-                            self.pending_decisions_lock.release()
-                    else:
-                        retry_count += 1
-                        logger.info(f"Retrying lock for tx_id {tx_id} (attempt {retry_count}/{50})")
-                        time.sleep(0.05)
+                # logger.info(f"Trying to lock accounts {sender} and {receiver} for tx_id {tx_id}.")
+                # retry_count = 0
+                # while retry_count < 50:
+                #     if self.pending_decisions_lock.acquire(timeout=0.1):
+                #         try:
+                #             if self.shardManager.is_account_in_cluster(sender):
+                #                 self.locks[sender] = True
+                #                 logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                #                 self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                #                 logger.info(f"pending_decisions: {self.pending_decisions}")
+                #             elif self.shardManager.is_account_in_cluster(receiver):
+                #                 self.locks[receiver] = True
+                #                 logger.info(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                #                 self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                #                 logger.info(f"pending_decisions: {self.pending_decisions}")
+                #             break
+                #         finally:
+                #             self.pending_decisions_lock.release()
+                #     else:
+                #         retry_count += 1
+                #         logger.info(f"Retrying lock for tx_id {tx_id} (attempt {retry_count}/{50})")
+                #         time.sleep(0.05)
 
-                if retry_count >= 50:
-                    logger.warning(f"Max retries reached for tx_id {tx_id}, but not aborting. Continuing to listen...")
+                # if retry_count >= 50:
+                #     logger.warning(f"Max retries reached for tx_id {tx_id}, but not aborting. Continuing to listen...")
             elif not is_2PC:
                 self.locks[sender] = True
                 self.locks[receiver] = True
@@ -608,7 +644,7 @@ class Server:
                 logger.info("Timeout waiting for APPEND_ACKs")
                 # Find the pending intra-shard transaction that has not yet been committed
                 pending_entry = next((entry for entry in self.log 
-                                    if not entry.is_2PC and entry.transaction), None)
+                                    if not entry.is_2PC), None)
 
                 if pending_entry and pending_entry.transaction:
                     sender = pending_entry.transaction.sender
@@ -637,10 +673,13 @@ class Server:
                 log_entry = self.log[index]
                 # If this is a 2PC transaction, send "VOTE YES" now (after replication but before execution)
                 if log_entry.is_2PC and log_entry.tx_id:
-                    with self.pending_decisions_lock:
-                        logger.info(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
-                        self.pending_decisions[log_entry.tx_id] = (time.time(), [log_entry.transaction.sender, log_entry.transaction.receiver])
-                        logger.info(f"pending_decisions: {self.pending_decisions}")
+                    logger.info(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
+                    self.pending_decisions[log_entry.tx_id] = (time.time(), [log_entry.transaction.sender, log_entry.transaction.receiver])
+                    logger.info(f"pending_decisions: {self.pending_decisions}")
+                    # with self.pending_decisions_lock:
+                    #     logger.info(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
+                    #     self.pending_decisions[log_entry.tx_id] = (time.time(), [log_entry.transaction.sender, log_entry.transaction.receiver])
+                    #     logger.info(f"pending_decisions: {self.pending_decisions}")
                         
                     vote = Vote(tx_id=log_entry.tx_id, vote="yes").to_dict()
                     logger.info(f"Sending VOTE YES for cross-shard transaction: {log_entry.transaction}")
@@ -707,8 +746,9 @@ class Server:
                     continue
 
             # transaction = log_entry.transaction # Get transaction from log
-            logger.info(f"Applying transaction: {(sender, receiver, amount)}")
-            self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
+            if log_entry.transaction is not None:
+                logger.info(f"Applying transaction: {(sender, receiver, amount)}")
+                self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
 
             logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
@@ -772,9 +812,11 @@ class Server:
                 #logger.info(f"log entry: {log_entry.to_dict()}")
                 # logger.info(f"self.pending_decisions_lock: {self.pending_decisions_lock}")
                 # logger.info(f"self.pending_decisions: {self.pending_decisions}")
-                with self.pending_decisions_lock:
-                    if tx_id in self.pending_decisions:
-                        del self.pending_decisions[tx_id]
+                if tx_id in self.pending_decisions:
+                    del self.pending_decisions[tx_id]
+                # with self.pending_decisions_lock:
+                #     if tx_id in self.pending_decisions:
+                #         del self.pending_decisions[tx_id]
                 self.commit_index = len(self.log) - 1 # FIXME: ??????
                 self.apply_committed_entries()
 

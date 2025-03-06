@@ -702,7 +702,7 @@ class Server:
     def _send(self, serialized_message, receiver, server_name, message):
         time.sleep(0.1)
         self.socket.sendto(serialized_message, receiver)
-        msg_type = message.pop('msg_type', 'UNKNOWN')
+        msg_type = message.get('msg_type', 'UNKNOWN')
         print(f"[T] {server_name} {msg_type}\n{json.dumps(message, indent=2)}")
 
     def send_message(self, message, receiver):
@@ -718,7 +718,6 @@ class Server:
             threading.Thread(target=self._send, args=(serialized_message, server_info['addr'], server_info['id'], message)).start()
 
     def send_append_entries(self, addr):
-        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
         if addr not in self.next_index:
             self.next_index[addr] = len(self.log)  # Initialize next_index for new leader
 

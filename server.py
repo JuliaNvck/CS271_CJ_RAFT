@@ -98,6 +98,7 @@ class Server:
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
         self.replication_mode = False  # Flag to indicate active replication
         self.append_ack_queue = queue.Queue()  # Queue for replication mode APPEND_ACKs
+        self.applied_log_indices = set()
 
 
         # Initialize data store for transactions
@@ -128,6 +129,7 @@ class Server:
             for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
                 if current_time - start_time > DECISION_TIMEOUT:
                     self.release_locks_for_transaction(tx_id)
+                    self.pending_decisions.pop(tx_id, None)  # Ensure removal
                     ack_message = Ack(tx_id=tx_id).to_dict()
                     self.send_message(ack_message, self.coordinator_addr)
             time.sleep(0.3)
@@ -162,6 +164,21 @@ class Server:
                 self.locks[receiver] = False
                 logger.info(f"Released lock on receiver {receiver} for transaction {tx_id}.")
             self.pending_decisions.pop(tx_id, None)
+
+    def release_locks_for_transaction(self, tx_id):
+        _, accounts = self.pending_decisions.get(tx_id, (None, []))
+        
+        # Ensure 'accounts' is a flat list of integers
+        for account in accounts:
+            if isinstance(account, list):
+                for acc in account:
+                    if self.shardManager.is_account_in_cluster(acc):
+                        self.locks[acc] = False
+                        logger.info(f"Unlocked account {acc}")
+            elif isinstance(account, int):
+                if self.shardManager.is_account_in_cluster(account):
+                    self.locks[account] = False
+                    logger.info(f"Unlocked account {account}")
     
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
@@ -338,12 +355,14 @@ class Server:
                 transaction = Transaction(transaction["sender"], transaction["receiver"], transaction["amount"])
 
             # Check if this is a decision log entry for a 2PC transaction
-            if is_2PC and transaction is None:
+            # if is_2PC and transaction is None:
+            if tx_id is not None:
                 existing_entry = next((e for e in self.log if e.tx_id == tx_id), None)
                 if existing_entry:
-                    logger.info(f"Updating committed_2PC status for tx_id: {tx_id} to {committed_2PC}")
-                    existing_entry.committed_2PC = committed_2PC
-                    continue
+                    if committed_2PC and not existing_entry.committed_2PC:
+                        logger.info(f"Updating committed_2PC status for tx_id: {tx_id} to {committed_2PC}")
+                        existing_entry.committed_2PC = committed_2PC
+                        continue
 
             # Lock accounts on followers
             # self.locks.setdefault(sender, False)
@@ -512,6 +531,9 @@ class Server:
         logger.info(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
         
         # Check if sender has sufficient balance
+        if self.shardManager.is_account_in_cluster(sender):
+            print(f"Sender: {sender}, Balance: {self.shardManager.get_balance(sender)}")
+
         if self.shardManager.is_account_in_cluster(sender) and self.shardManager.get_balance(sender) < amount:
             logger.info(f"Transaction rejected: {sender} has insufficient balance.")
             if is_2PC:
@@ -643,18 +665,25 @@ class Server:
             except queue.Empty:
                 logger.info("Timeout waiting for APPEND_ACKs")
                 # Find the pending intra-shard transaction that has not yet been committed
-                pending_entry = next((entry for entry in self.log 
-                                    if not entry.is_2PC), None)
+                for index, entry in enumerate(self.log):
+                    if not entry.is_2PC:
+                        if index <= self.commit_index:
+                            logger.info(f"Entry at index {index} is already committed. Skipping failure response.")
+                            continue
 
-                if pending_entry and pending_entry.transaction:
-                    sender = pending_entry.transaction.sender
-                    receiver = pending_entry.transaction.receiver
-                    amount = pending_entry.transaction.amount
-                    
-                    # Send a failure response to the client for intra-shard transaction
-                    logger.info(f"Sending failure ClientResponse for intra-shard transaction with tx_id {pending_entry.tx_id}")
-                    failure_response = ClientResponse(False, sender, receiver, amount).to_dict()
-                    self.send_message(failure_response, self.coordinator_addr)
+
+                # pending_entry = next((entry for entry in self.log 
+                #                     if not entry.is_2PC), None)
+
+                    if entry and entry.transaction:
+                        sender = entry.transaction.sender
+                        receiver = entry.transaction.receiver
+                        amount = entry.transaction.amount
+                        
+                        # Send a failure response to the client for intra-shard transaction
+                        logger.info(f"Sending failure ClientResponse for intra-shard transaction with tx_id {pending_entry.tx_id}")
+                        failure_response = ClientResponse(False, sender, receiver, amount).to_dict()
+                        self.send_message(failure_response, self.coordinator_addr)
                 break
 
         self.replication_mode = False  # Exit replication mode
@@ -694,12 +723,19 @@ class Server:
         """Apply committed log entries to the state machine."""
         logger.info(f"applying entries up to index {self.commit_index}")
         UPDATE_COMMIT_INDEX = False
+        UPDATE_LAST_APPLIED = False
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
             UPDATE_LAST_APPLIED = True
             log_entry = self.log[i]
             logger.info(f"i: {i}")
 
+            # Prevent reapplying the same log entry using log index
+            if self.last_applied in self.applied_log_indices:
+                logger.info(f"Log entry at index {self.last_applied} already applied. Skipping.")
+                continue
+
+            sender, receiver = None, None
             if log_entry.transaction:
                 # Handle the case where transaction is a dict instead of a Transaction object
                 # if transaction == None it should be skipped by "if i == decision_entry_index:""
@@ -737,10 +773,10 @@ class Server:
                 if not decision_entry.committed_2PC:
                     logger.info(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
                     # Unlock accounts and do NOT execute
-                    if self.shardManager.is_account_in_cluster(sender):
+                    if sender is not None and self.shardManager.is_account_in_cluster(sender):
                         self.locks[sender] = False
                         logger.info(f"Unlocked sender {sender}")
-                    elif self.shardManager.is_account_in_cluster(receiver):
+                    elif receiver is not None and self.shardManager.is_account_in_cluster(receiver):
                         self.locks[receiver] = False
                         logger.info(f"Unlocked receiver {receiver}")
                     continue
@@ -749,8 +785,10 @@ class Server:
             if log_entry.transaction is not None:
                 logger.info(f"Applying transaction: {(sender, receiver, amount)}")
                 self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
+                # if not log_entry.is_2PC:
+                self.applied_log_indices.add(self.last_applied)
 
-            logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+                logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
             # Leader notifies client
             if not log_entry.is_2PC:
@@ -812,8 +850,11 @@ class Server:
                 #logger.info(f"log entry: {log_entry.to_dict()}")
                 # logger.info(f"self.pending_decisions_lock: {self.pending_decisions_lock}")
                 # logger.info(f"self.pending_decisions: {self.pending_decisions}")
+                # if tx_id in self.pending_decisions:
+                #     del self.pending_decisions[tx_id]
                 if tx_id in self.pending_decisions:
-                    del self.pending_decisions[tx_id]
+                    logger.info(f"Removing tx_id {tx_id} from pending decisions after decision.")
+                    self.pending_decisions.pop(tx_id, None)
                 # with self.pending_decisions_lock:
                 #     if tx_id in self.pending_decisions:
                 #         del self.pending_decisions[tx_id]

@@ -699,16 +699,23 @@ class Server:
                 if self.role == "follower" and time.time() - self.last_heartbeat > self.election_timeout:
                     self.start_election()
     
+    def _send(self, serialized_message, receiver, server_name, message):
+        time.sleep(0.1)
+        self.socket.sendto(serialized_message, receiver)
+        msg_type = message.pop('msg_type', 'UNKNOWN')
+        print(f"[T] {server_name} {msg_type}\n{json.dumps(message, indent=2)}")
+
     def send_message(self, message, receiver):
-        serialized_message = json.dumps(message).encode('utf-8') 
-        try:
-            time.sleep(0.1)
-            self.socket.sendto(serialized_message, receiver)  # send the message via UDP
-            #print(f"[T] {self.SERVER_NAMES[receiver]}: {json.dumps(message, indent=2)}")
-            msg_type = message.pop('msg_type', 'UNKNOWN')  # Extract 'msg_type' or default to 'UNKNOWN'
-            print(f"[T] {self.SERVER_NAMES[receiver]} {msg_type}\n{json.dumps(message, indent=2)}")
-        except Exception as e:
-            print(f"Error sending message to {self.SERVER_NAMES[receiver]}: {e}")
+        serialized_message = json.dumps(message).encode('utf-8')
+        server_name = self.SERVER_NAMES[receiver]
+        
+        threading.Thread(target=self._send, args=(serialized_message, receiver, server_name, message)).start()
+
+    def clustercast(self, message, cluster):
+        serialized_message = json.dumps(message).encode('utf-8')
+        
+        for server_info in self.cluster_to_servers[self.my_cluster]:
+            threading.Thread(target=self._send, args=(serialized_message, server_info['addr'], server_info['id'], message)).start()
 
     def send_append_entries(self, addr):
         """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
@@ -717,9 +724,6 @@ class Server:
 
         prev_log_index = self.next_index[addr] - 1
         prev_log_term = self.log[prev_log_index].term if prev_log_index >= 0 else 0
-
-        # Send all missing log entries starting from next_index
-        # entries = [{"term": entry.term, "transaction": vars(entry.transaction)} for entry in self.log[self.next_index[addr]:]]
 
         entries = [{
             "term": entry.term,
@@ -739,18 +743,6 @@ class Server:
 
         self.send_message(message, addr)
         print(f"Leader {self.my_address} sent AppendEntries RPC to {addr} with {len(entries)} entries.")
-
-    def clustercast(self, message, cluster):
-        """Send a message to all servers (except oneself) in a cluster"""
-
-        serialized_message = json.dumps(message).encode('utf-8')
-        time.sleep(0.1)
-        for server_info in self.cluster_to_servers[self.my_cluster]:
-            try:
-                self.socket.sendto(serialized_message, server_info['addr'])
-                print(f"[T] {server_info['id']} {message.get('msg_type')}")
-            except Exception as e:
-                print(f"Error clustercasting to {server_info['id']}: {e}")
     
     def run(self):
         threading.Thread(target=self.listen, daemon=True).start()

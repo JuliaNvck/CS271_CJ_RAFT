@@ -13,7 +13,7 @@ from shard_manager import ShardManager
 from log_entry import LogEntry
 from transaction import Transaction
 
-DECISION_TIMEOUT = 3
+DECISION_TIMEOUT = 8
 HEARTBEAT_INTERVAL = 3          # seconds
 ELECTION_TIMEOUT_RANGE = (1, 10) # seconds
 TRANSACTION_TIMEOUT = 5         # Timeout for acquiring locks (seconds)
@@ -74,6 +74,9 @@ class Server:
         self.role = "follower"  # Initial state is follower
         self.election_timeout = random.uniform(*ELECTION_TIMEOUT_RANGE)  # Randomized timeout for leader election
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
+        self.replication_mode = False  # Flag to indicate active replication
+        self.append_ack_queue = queue.Queue()  # Queue for replication mode APPEND_ACKs
+
 
         # Initialize data store for transactions
         self.data_store = {id: 10 for id in range(self.shard_start, self.shard_end + 1)}
@@ -81,33 +84,36 @@ class Server:
         self.locks = {id: False for id in range(self.shard_start, self.shard_end + 1)}
         
         self.pending_decisions = {}  # Track pending 2PC transactions {tx_id: (timestamp, transaction)}
+        self.pending_decisions_lock = threading.Lock()  # To prevent race conditions
         threading.Thread(target=self.check_pending_decisions, daemon=True).start()
 
     def check_pending_decisions(self):
         while True:
             current_time = time.time()
-            if self.pending_decisions:
-                for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
-                    if current_time - start_time > DECISION_TIMEOUT:
-                        print(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
-                        self.release_locks_for_transaction(tx_id)
-                        ack_message = Ack(tx_id=tx_id).to_dict()
-                        self.send_message(ack_message, self.coordinator_addr)
-            time.sleep(0.3)
+            with self.pending_decisions_lock:
+                if self.pending_decisions:
+                    for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
+                        if current_time - start_time > DECISION_TIMEOUT:
+                            print(f"Transaction {tx_id} timed out. Releasing locks and sending Ack.")
+                            self.release_locks_for_transaction(tx_id)
+                            ack_message = Ack(tx_id=tx_id).to_dict()
+                            self.send_message(ack_message, self.coordinator_addr)
+                time.sleep(0.3)
 
     def release_locks_for_transaction(self, tx_id):
-        _, transaction = self.pending_decisions.get(tx_id, (None, None))
-        if transaction:
-            sender = transaction[0]
-            receiver = transaction[1]
-            if self.shardManager.is_account_in_cluster(sender):
-                self.locks[sender] = False
-                print(f"Released lock on sender {sender} for transaction {tx_id}.")
-            if self.shardManager.is_account_in_cluster(receiver):
-                self.locks[receiver] = False
-                print(f"Released lock on receiver {receiver} for transaction {tx_id}.")
-        if tx_id in self.pending_decisions:
-            del self.pending_decisions[tx_id]
+        with self.pending_decisions_lock:
+            _, transaction = self.pending_decisions.get(tx_id, (None, None))
+            if transaction:
+                sender = transaction[0]
+                receiver = transaction[1]
+                if self.shardManager.is_account_in_cluster(sender):
+                    self.locks[sender] = False
+                    print(f"Released lock on sender {sender} for transaction {tx_id}.")
+                if self.shardManager.is_account_in_cluster(receiver):
+                    self.locks[receiver] = False
+                    print(f"Released lock on receiver {receiver} for transaction {tx_id}.")
+            if tx_id in self.pending_decisions:
+                del self.pending_decisions[tx_id]
     
     def step_down_to_follower(self, new_term):
         """Step down to follower upon receiving a higher term."""
@@ -274,10 +280,16 @@ class Server:
             if is_2PC and transaction is not None:
                 if self.shardManager.is_account_in_cluster(sender):
                     self.locks[sender] = True
-                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                    with self.pending_decisions_lock:
+                        print(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                        self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                        print(f"pending_decisions: {self.pending_decisions}")
                 elif self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = True
-                    self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                    with self.pending_decisions_lock:
+                        print(f"tx_id: {tx_id}, sender: {sender}, receiver: {receiver}")
+                        self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
+                        print(f"pending_decisions: {self.pending_decisions}")
             elif not is_2PC:
                 self.locks[sender] = True
                 self.locks[receiver] = True
@@ -439,11 +451,9 @@ class Server:
             if self.shardManager.is_account_in_cluster(sender):
                 # lock sender
                 self.locks[sender] = True
-                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
             elif self.shardManager.is_account_in_cluster(receiver):
                 # lock receiver
                 self.locks[receiver] = True
-                self.pending_decisions[tx_id] = (time.time(), [sender, receiver])
 
         # Create log entry and execute RAFT to replicate
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
@@ -455,43 +465,79 @@ class Server:
         # Send AppendEntries to all followers
         self.replicate_log()
     
+    # def replicate_log(self):
+    #     """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
+    #     for server in self.cluster_to_servers[self.my_cluster]:
+    #         self.send_append_entries(server['addr'])
+
+    #     # Wait for acknowledgments and retry if log inconsistency is detected
+    #     start_time = time.time()
+    #     acks_received = 1  # Leader counts itself
+
+    #     while time.time() - start_time < 10:  # Wait for responses
+    #         try:
+    #             data, addr = self.socket.recvfrom(4096)
+    #             response = json.loads(data.decode('utf-8'))
+    #             print(f"Received message from {addr}: {response}")
+
+    #             if response.get("msg_type") == "APPEND_ACK":
+    #                 if response.get("success"):
+    #                     print(f"Received ACK from {addr}")
+    #                     acks_received += 1
+    #                     self.next_index[addr] = len(self.log)  # Move next_index forward
+    #                     self.match_index[addr] = self.next_index[addr] - 1
+    #                     # print(f"Match index for {addr}: {self.match_index[addr]}")
+    #                     # print(f"Next index for {addr}: {self.next_index[addr]}")
+
+    #                     # If a majority has replicated, update commit index
+    #                     if acks_received > 1:
+    #                         print(f"Majority reached with {acks_received} ACKs")
+    #                         self.update_commit_index()
+    #                         return
+    #                 else:
+    #                     print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
+    #                     self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
+    #                     self.replicate_log()
+    #                     return
+
+    #         except socket.timeout:
+    #             break  # Timeout, no majority reached
+
     def replicate_log(self):
-        """Leader sends AppendEntries RPC to a follower starting from next_index[addr]."""
+        """Leader sends AppendEntries RPC to a follower and waits for majority acknowledgment."""
+        self.replication_mode = True  # Enter replication mode
+
         for server in self.cluster_to_servers[self.my_cluster]:
             self.send_append_entries(server['addr'])
 
-        # Wait for acknowledgments and retry if log inconsistency is detected
-        start_time = time.time()
         acks_received = 1  # Leader counts itself
+        start_time = time.time()
 
-        while time.time() - start_time < 7:  # Wait 3 seconds for responses
+        while time.time() - start_time < 10:  # Wait for responses
             try:
-                data, addr = self.socket.recvfrom(4096)
-                response = json.loads(data.decode('utf-8'))
-                print(f"Received message from {addr}: {response}")
+                message, addr = self.append_ack_queue.get(timeout=1)
+                print(f"Replication mode: Received APPEND_ACK from {addr}: {message}")
 
-                if response.get("msg_type") == "APPEND_ACK":
-                    if response.get("success"):
-                        print(f"Received ACK from {addr}")
-                        acks_received += 1
-                        self.next_index[addr] = len(self.log)  # Move next_index forward
-                        self.match_index[addr] = self.next_index[addr] - 1
-                        print(f"Match index for {addr}: {self.match_index[addr]}")
-                        print(f"Next index for {addr}: {self.next_index[addr]}")
+                if message.get("success"):
+                    self.next_index[addr] = len(self.log)
+                    self.match_index[addr] = self.next_index[addr] - 1
 
-                        # If a majority has replicated, update commit index
-                        if acks_received > 1:
-                            print(f"Majority reached with {acks_received} ACKs")
-                            self.update_commit_index()
-                            return
-                    else:
-                        print(f"Log inconsistency detected with {addr}, decrementing next_index and retrying...")
-                        self.next_index[addr] = max(0, self.next_index[addr] - 1)  # Move next_index back and retry
-                        self.replicate_log()
-                        return
+                    match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
+                    if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
+                        print(f"Majority of {match_count} reached, updating commit index.")
+                        self.update_commit_index()
+                        break
 
-            except socket.timeout:
-                break  # Timeout, no majority reached
+                else:
+                    print(f"Log inconsistency with {addr}, retrying...")
+                    self.next_index[addr] = max(0, self.next_index[addr] - 1)
+                    self.send_append_entries(addr)
+
+            except queue.Empty:
+                print("Timeout waiting for APPEND_ACKs")
+                break
+
+        self.replication_mode = False  # Exit replication mode
 
     def update_commit_index(self):
         """Marks log entries as committed if stored on a majority of servers and at least one from the current term."""
@@ -507,6 +553,11 @@ class Server:
                 log_entry = self.log[index]
                 # If this is a 2PC transaction, send "VOTE YES" now (after replication but before execution)
                 if log_entry.is_2PC and log_entry.tx_id:
+                    with self.pending_decisions_lock:
+                        print(f"tx_id: {log_entry.tx_id}, sender: {log_entry.transaction.sender}, receiver: {log_entry.transaction.receiver}")
+                        self.pending_decisions[log_entry.tx_id] = (time.time(), [log_entry.transaction.sender, log_entry.transaction.receiver])
+                        print(f"pending_decisions: {self.pending_decisions}")
+                        
                     vote = Vote(tx_id=log_entry.tx_id, vote="yes").to_dict()
                     print(f"Sending VOTE YES for cross-shard transaction: {log_entry.transaction}")
                     self.send_message(vote, self.coordinator_addr)
@@ -615,7 +666,10 @@ class Server:
 
          # Find the corresponding log entry
         for log_entry in self.log:
-            if log_entry.is_2PC and log_entry.tx_id == tx_id and log_entry.transaction and tx_id in self.pending_decisions:
+            print(f"log_entry : {log_entry.to_dict()}")
+            print(f"tx_id {tx_id} in self.pending_decisions : {log_entry.tx_id in self.pending_decisions}")
+            print(f"self.pending_decisions: {self.pending_decisions}")
+            if log_entry.is_2PC and log_entry.tx_id == tx_id and log_entry.transaction:
                 # Append a decision log entry for COMMIT or ABORT
                 decision_entry = LogEntry(
                     term=self.current_term,
@@ -628,7 +682,10 @@ class Server:
                 self.shardManager.append_to_log(decision_entry)
                 print(f"Appended {decision} log entry for tx_id {tx_id}")
                 print(f"log entry: {log_entry.to_dict()}")
-                del self.pending_decisions[tx_id]
+                print(f"self.pending_decisions_lock: {self.pending_decisions_lock}")
+                print(f"self.pending_decisions: {self.pending_decisions}")
+                with self.pending_decisions_lock:
+                    del self.pending_decisions[tx_id]
                 self.commit_index = len(self.log) - 1 # FIXME: ??????
                 self.apply_committed_entries()
 
@@ -638,27 +695,50 @@ class Server:
 
     
     def handle_append_ack(self, message, addr):
-        """Handle incoming AppendAck responses to maintain log consistency."""
+        """Handle incoming AppendAck responses to maintain log consistency/repair."""
         success = message.get("success", False)
 
+        if self.replication_mode:
+            print(f"Replication mode active: Queueing APPEND_ACK from {addr}")
+            self.append_ack_queue.put((message, addr))
+            return
+
         if success:
-            print(f"Received successful APPEND_ACK from {addr}")
-            # Move next index forward and update match index
+            print(f"Log repair: Received successful APPEND_ACK from {addr}")
             self.next_index[addr] = len(self.log)
             self.match_index[addr] = self.next_index[addr] - 1
-            print(f"Match index for {addr}: {self.match_index[addr]}")
-            print(f"Next index for {addr}: {self.next_index[addr]}")
-
             # Check for majority replication and update commit index if applicable
             match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
             if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
                 self.update_commit_index()
-
         else:
-            print(f"Log inconsistency detected with {addr}, initiating log repair...")
-            # Decrement next index and retry log replication
+            print(f"Log repair: Log inconsistency detected with {addr}, initiating repair...")
             self.next_index[addr] = max(0, self.next_index[addr] - 1)
             self.send_append_entries(addr)
+
+    
+    # def handle_append_ack(self, message, addr):
+    #     """Handle incoming AppendAck responses to maintain log consistency/repair."""
+    #     success = message.get("success", False)
+
+    #     if success:
+    #         print(f"Received successful APPEND_ACK from {addr}")
+    #         # Move next index forward and update match index
+    #         self.next_index[addr] = len(self.log)
+    #         self.match_index[addr] = self.next_index[addr] - 1
+    #         print(f"Match index for {addr}: {self.match_index[addr]}")
+    #         print(f"Next index for {addr}: {self.next_index[addr]}")
+
+    #         # Check for majority replication and update commit index if applicable
+    #         match_count = sum(1 for index in self.match_index.values() if index >= self.commit_index)
+    #         if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
+    #             self.update_commit_index()
+
+    #     else:
+    #         print(f"Log inconsistency detected with {addr}, initiating log repair...")
+    #         # Decrement next index and retry log replication
+    #         self.next_index[addr] = max(0, self.next_index[addr] - 1)
+    #         self.send_append_entries(addr)
 
     
     def listen(self):

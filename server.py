@@ -89,11 +89,6 @@ class Server:
             with open(f"shards/{server_id}_log.json", "r") as file:
                 log_data = json.load(file)
                 self.last_applied = log_data.get("last_applied", self.commit_index)
-            # self.last_applied = self.commit_index
-        # else
-        #   create new log file as normal
-        #   write over balance table
-        #   ^ these are both done in ShardManager.init()
 
         self.next_index = {} # Index of the next log entry to send to each follower
         self.match_index = {} # Index of the highest log entry known to be replicated on a server
@@ -102,8 +97,6 @@ class Server:
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
         self.replication_mode = False  # Flag to indicate active replication
         self.append_ack_queue = queue.Queue()  # Queue for replication mode APPEND_ACKs
-        # self.applied_log_indices = set()
-        
         self.applied_log_indices = self.shardManager.get_applied_indices()
 
 
@@ -114,7 +107,6 @@ class Server:
         
         self.pending_decisions = {}  # Track pending 2PC transactions {tx_id: (timestamp, transaction)}
         self.timed_out_transactions = set()
-        # self.pending_decisions_lock = threading.Lock()  # To prevent race conditions
         threading.Thread(target=self.check_pending_decisions, daemon=True).start()
 
     def check_pending_decisions(self):
@@ -336,14 +328,6 @@ class Server:
                 receiver = transaction.get("receiver")
                 logger.info(f"Processing transaction - sender: {sender}, receiver: {receiver}, tx_id: {tx_id}")
             
-            # Check if this is a decision update for an existing 2PC transaction
-            # if tx_id is not None:
-            #     existing_entry = next((e for e in self.log if hasattr(e, 'tx_id') and e.tx_id == tx_id), None)
-            #     if existing_entry and committed_2PC and not existing_entry.committed_2PC:
-            #         logger.info(f"Updating committed_2PC status for tx_id: {tx_id} to {committed_2PC}")
-            #         existing_entry.committed_2PC = committed_2PC
-            #         continue  # Skip adding a new entry
-            
             # Handle locks based on transaction type
             if transaction:
                 if isinstance(transaction, dict):
@@ -548,7 +532,7 @@ class Server:
 
         # Create log entry and execute RAFT to replicate
         if not is_2PC:
-            # Generate a unique transaction ID even for intra-shard transactions
+            # Generate a unique transaction ID for intra-shard transactions
             if tx_id is None:
                 tx_id = f"intra-{str(uuid.uuid4())}"
 
@@ -929,11 +913,6 @@ class Server:
         if not found_entry:
             logger.info(f"No matching log entry found for tx_id {tx_id}, but still added decision and releasing locks")
         
-        # if decision != "COMMIT":
-        #     # ABORT Release locks for this transaction
-        #     self.release_locks_for_transaction(tx_id)
-        #     logger.info(f"Transaction with tx_id {tx_id} was ABORTED. Releasing locks.")
-        # Always send an ACK back to the client (coordinator)
         ack_message = Ack(tx_id=tx_id).to_dict()
         self.send_message(ack_message, addr)
         

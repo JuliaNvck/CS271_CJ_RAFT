@@ -715,21 +715,25 @@ class Server:
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
-        logger.info(f"applying entries up to index {self.commit_index}")
+        logger.info(f"Entering apply_committed_entries...")
+        logger.info(f"last_applied= {self.last_applied}")
+        logger.info(f"commit_index= {self.commit_index}")
+        logger.info(f"Range: {range(self.last_applied + 1, self.commit_index + 1)}")
         
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
+            logger.info(f"i: {i}")
             if i >= len(self.log):
                 logger.warning(f"Cannot apply entry at index {i}, log length is {len(self.log)}")
                 break
                 
             # Prevent reapplying the same log entry using log index
             if i in self.applied_log_indices:
-                logger.info(f"Log entry at index {i} already applied. Skipping.")
+                logger.info(f"Log entry at index {i} already applied. Skipping to {i+1}...")
                 continue
                 
             log_entry = self.log[i]
-            logger.info(f"Processing log entry at index {i}: {log_entry}")
+            logger.info(f"Log entry {i}: {log_entry.to_dict()}")
 
             sender, receiver, amount = None, None, None
             if log_entry.transaction:

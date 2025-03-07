@@ -60,7 +60,10 @@ class UDPMessenger:
                 message = Message.from_dict(message_dict)
 
                 # Log the received message
-                self.logger.info(f"[R] {addr[1]} {message.msg_type}")
+                if message.msg_type == "CLIENT_RESPONSE":
+                    self.logger.info(f"[R] {addr[1]} {message.msg_type} success: {message.success}")
+                else:
+                    self.logger.info(f"[R] {addr[1]} {message.msg_type}")
                 self.logger.debug(f"[R] {addr[1]} {message_dict}")
 
                 # Pass the message to the handler (if provided)

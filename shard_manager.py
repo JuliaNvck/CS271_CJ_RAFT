@@ -100,11 +100,13 @@ class ShardManager:
 
         if not self.is_account_in_cluster(x) and not self.is_account_in_cluster(y):
             raise ValueError(f"Neither account {x} nor account {y} belongs to cluster {self.cluster}.")
+            return False
 
         if self.is_account_in_cluster(x):
             x_balance = self.get_balance(x)
             if x_balance < amt:
                 raise ValueError(f"Insufficient balance in account {x} balance: {x_balance}.")
+                return False
             self.update_balance(x, x_balance - amt)
 
         if self.is_account_in_cluster(y):
@@ -113,6 +115,7 @@ class ShardManager:
 
         # Update the commit index in the log file
         self.store_commit_apply_index(commit_index, last_applied_index)
+        return True
 
     def is_account_in_cluster(self, account_id):
         if self.cluster == 1:
@@ -181,6 +184,22 @@ class ShardManager:
             json.dump({"entries": [entry.to_dict() for entry in truncated_log], "commit_index": commit_index}, file, indent=2)
         
         return truncated_log
+    
+    def store_applied_indices(self, applied_indices):
+        """Store the set of applied log indices to disk"""
+        applied_file = os.path.join(self.shards_folder, f"{self.server_id}_applied.json")
+        with open(applied_file, 'w') as file:
+            json.dump({"applied_indices": list(applied_indices)}, file)
+
+    def get_applied_indices(self):
+        """Load the set of applied log indices from disk"""
+        applied_file = os.path.join(self.shards_folder, f"{self.server_id}_applied.json")
+        if not os.path.exists(applied_file):
+            return set()
+        
+        with open(applied_file, 'r') as file:
+            data = json.load(file)
+            return set(data.get("applied_indices", []))
     
     def get_last_log_entry(self):
         log, _ = self.get_log()

@@ -7,6 +7,7 @@ import json
 import time
 import random
 import queue
+import uuid
 import logging
 from datetime import datetime
 from messages import *
@@ -101,7 +102,9 @@ class Server:
         self.last_heartbeat = time.time()  # Track leader's last heartbeat
         self.replication_mode = False  # Flag to indicate active replication
         self.append_ack_queue = queue.Queue()  # Queue for replication mode APPEND_ACKs
-        self.applied_log_indices = set()
+        # self.applied_log_indices = set()
+        
+        self.applied_log_indices = self.shardManager.get_applied_indices()
 
 
         # Initialize data store for transactions
@@ -544,6 +547,11 @@ class Server:
                 self.locks[receiver] = True
 
         # Create log entry and execute RAFT to replicate
+        if not is_2PC:
+            # Generate a unique transaction ID even for intra-shard transactions
+            if tx_id is None:
+                tx_id = f"intra-{str(uuid.uuid4())}"
+
         transaction = Transaction(sender=sender, receiver=receiver, amount=amount)
         new_log_entry = LogEntry(term=self.current_term, transaction=transaction, is_2PC=is_2PC, tx_id=tx_id)
         self.log.append(new_log_entry)  # Append to leader log
@@ -795,16 +803,32 @@ class Server:
                         logger.info(f"Unlocked receiver {receiver}")
 
                     self.applied_log_indices.add(i)
+                    self.shardManager.store_applied_indices(self.applied_log_indices)
                     if i == continuous_applied + 1:
                         continuous_applied = i
                     continue
 
+            # check balance
+            if self.shardManager.is_account_in_cluster(sender):
+                balance = self.shardManager.get_balance(sender)
+                if balance < amount:
+                    logger.info(f"Transaction rejected: {sender} has insufficient balance.")
+                    self.applied_log_indices.add(i)
+                    self.shardManager.store_applied_indices(self.applied_log_indices)
+                    if i == continuous_applied + 1:
+                        continuous_applied = i
+                    continue
+            
             # Execute the transaction
             logger.info(f"Applying transaction: {(sender, receiver, amount)}")
-            self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index, i)
-            self.applied_log_indices.add(i)
-            if i == continuous_applied + 1:
-                continuous_applied = i
+            success = self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index, i)
+            if success:
+                self.applied_log_indices.add(i)
+                self.shardManager.store_applied_indices(self.applied_log_indices)
+                if i == continuous_applied + 1:
+                    continuous_applied = i
+            else:
+                logger.warning(f"Failed to execute transaction at index {i}, skipping...")
             if log_entry.is_2PC:
             # Remove this transaction from pending decisions if it exists
                 if log_entry.tx_id in self.pending_decisions:
@@ -835,30 +859,6 @@ class Server:
                 elif self.shardManager.is_account_in_cluster(receiver):
                     self.locks[receiver] = False
                     logger.info(f"Unlocked receiver {receiver}")
-        
-        # # Update last_applied to the highest applied index
-        # # if self.applied_log_indices:
-        # #     self.last_applied = max(self.applied_log_indices)
-        # # Update last_applied to the highest applied index
-        # if self.applied_log_indices:
-        #     # self.last_applied = max(self.applied_log_indices)
-        #     last_applied = self.last_applied
-        #     # Sort the indices to ensure they are in order
-        #     sorted_indices = sorted(self.applied_log_indices)
-            
-        #     # Initialize the last_applied to -1
-        #     # last_applied = -1
-            
-        #     # Iterate through the sorted indices to find the maximum contiguous sequence
-        #     for val in sorted_indices:
-        #         if val == last_applied + 1:
-        #             last_applied = val
-        #         else:
-        #             break
-            
-        #     logger.info(f"Last applied= {last_applied}")
-        #     self.last_applied = last_applied
-        # self.shardManager.store_commit_apply_index(self.commit_index, self.last_applied)
 
         # Update last_applied with the highest continuous index
         if continuous_applied > self.last_applied:

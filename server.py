@@ -1165,21 +1165,25 @@ class Server:
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
-        logger.info(f"applying entries up to index {self.commit_index}")
+        logger.info(f"Entering apply_committed_entries...")
+        logger.info(f"last_applied= {self.last_applied}")
+        logger.info(f"commit_index= {self.commit_index}")
+        logger.info(f"Range: {range(self.last_applied + 1, self.commit_index + 1)}")
         
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
+            logger.info(f"i: {i}")
             if i >= len(self.log):
                 logger.warning(f"Cannot apply entry at index {i}, log length is {len(self.log)}")
                 break
                 
             # Prevent reapplying the same log entry using log index
             if i in self.applied_log_indices:
-                logger.info(f"Log entry at index {i} already applied. Skipping.")
+                logger.info(f"Log entry at index {i} already applied. Skipping to {i+1}...")
                 continue
                 
             log_entry = self.log[i]
-            logger.info(f"Processing log entry at index {i}: {log_entry}")
+            logger.info(f"Log entry {i}: {log_entry.to_dict()}")
 
             sender, receiver, amount = None, None, None
             if log_entry.transaction:
@@ -1196,27 +1200,32 @@ class Server:
             # 2PC Transaction: Find the decision entry for this transaction
             decision_entry_index, decision_entry = None, None
             if log_entry.is_2PC:
-                for index, entry in enumerate(self.log):
+                logger.info(f"Log entry is 2PC. Looking for decision...")
+                for val, entry in enumerate(self.log):
                     if entry.is_2PC and entry.tx_id == log_entry.tx_id and entry.transaction is None:
-                        decision_entry_index = index
+                        decision_entry_index = val
                         decision_entry = entry
                         break
-                        
+                
+                logger.info(f"decision_entry_index == None: {decision_entry_index is None}")
                 if decision_entry_index is not None:
                     logger.info(f"Found decision entry index: {decision_entry_index} decision entry: {decision_entry.to_dict()}")
                 
                 # Skip decision entries (they don't contain actual transaction data)
+                logger.info(f"log_entry.transaction is None: {log_entry.transaction is None}")
                 if log_entry.transaction is None:
-                    logger.info("Skipping decision entry")
+                    logger.info(f"Added {i} to applied_log_instances. Skipping to {i+1}...")
                     self.applied_log_indices.add(i)
                     continue
                 
                 # If no decision found yet, skip execution
+                logger.info(f"decision_entry is None: {decision_entry is None}")
                 if decision_entry is None:
-                    logger.info(f"Skipping execution for 2PC transaction (tx_id: {log_entry.tx_id}), waiting for COMMIT/ABORT decision.")
+                    logger.info(f"Waiting for COMMIT/ABORT for tx_id: {log_entry.tx_id}). Skipping to {i+1}...")
                     continue
                     
                 # If transaction was aborted, unlock accounts and skip execution
+                logger.info(f"committed_2pc (T/F): {decision_entry.committed_2PC}")
                 if not decision_entry.committed_2PC:
                     logger.info(f"2PC transaction (tx_id: {log_entry.tx_id}) was ABORTED. Unlocking accounts and skipping execution.")
                     # Unlock accounts and do NOT execute
@@ -1233,8 +1242,9 @@ class Server:
             if log_entry.transaction is not None:
                 logger.info(f"Applying transaction: {(sender, receiver, amount)}")
                 self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
+                logger.info(f"Executed: ({sender}, {amount}, {receiver})")
                 self.applied_log_indices.add(i)
-                logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
+                logger.info(f"Added {i} to applied_indicies")
 
                 # Leader notifies client for non-2PC transactions
                 if not log_entry.is_2PC:
@@ -1262,7 +1272,21 @@ class Server:
         
         # Update last_applied to the highest applied index
         if self.applied_log_indices:
-            self.last_applied = max(self.applied_log_indices)
+            # Sort the indices to ensure they are in order
+            sorted_indices = sorted(self.applied_log_indices)
+            
+            # Initialize the last_applied to -1
+            last_applied = -1
+            
+            # Iterate through the sorted indices to find the maximum contiguous sequence
+            for val in sorted_indices:
+                if val == last_applied + 1:
+                    last_applied = val
+                else:
+                    break
+            
+            logger.info(f"Last applied= {last_applied}")
+            self.last_applied = last_applied
     
     # def handle_decision(self, message, addr):
     #     """Handles COMMIT/ABORT decision for a cross-shard (2PC) transaction."""

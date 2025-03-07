@@ -128,10 +128,8 @@ class Server:
                 
                 if current_time - start_time > DECISION_TIMEOUT:
                     logger.info(f"Transaction {tx_id} timed out after {DECISION_TIMEOUT}s")
-                    
                     # Mark this transaction as timed out in your transaction state
                     self.timed_out_transactions.add(tx_id)
-
                     # Update the log entry to mark it as aborted
                     for i in range(len(self.log)):
                         if self.log[i].tx_id == tx_id:
@@ -141,10 +139,8 @@ class Server:
                     
                     # Release the locks
                     self.release_locks_for_transaction(tx_id)
-                    
                     # Remove from pending decisions
                     self.pending_decisions.pop(tx_id, None)
-                    
                     # Send an ABORT message to the coordinator
                     ack_message = Ack(tx_id=tx_id).to_dict()
                     self.send_message(ack_message, self.coordinator_addr)
@@ -477,8 +473,8 @@ class Server:
         logger.info(f"Received client request: {sender} sends ${amount} to {receiver}, cross-shard: {is_2PC}")
         
         # Check if sender has sufficient balance
-        if self.shardManager.is_account_in_cluster(sender):
-            print(f"Sender: {sender}, Balance: {self.shardManager.get_balance(sender)}")
+        # if self.shardManager.is_account_in_cluster(sender):
+        #     print(f"Sender: {sender}, Balance: {self.shardManager.get_balance(sender)}")
 
         if self.shardManager.is_account_in_cluster(sender) and self.shardManager.get_balance(sender) < amount:
             logger.info(f"Transaction rejected: {sender} has insufficient balance.")
@@ -730,10 +726,10 @@ class Server:
 
     def apply_committed_entries(self):
         """Apply committed log entries to the state machine."""
-        logger.info(f"Entering apply_committed_entries...")
-        logger.info(f"last_applied= {self.last_applied}")
-        logger.info(f"commit_index= {self.commit_index}")
-        logger.info(f"Range: {range(self.last_applied + 1, self.commit_index + 1)}")
+        # logger.info(f"Entering apply_committed_entries...")
+        # logger.info(f"last_applied= {self.last_applied}")
+        # logger.info(f"commit_index= {self.commit_index}")
+        # logger.info(f"Range: {range(self.last_applied + 1, self.commit_index + 1)}")
 
         # Track the highest continuously applied index
         continuous_applied = self.last_applied
@@ -754,7 +750,7 @@ class Server:
                 continue
                 
             log_entry = self.log[i]
-            logger.info(f"Log entry {i}: {log_entry.to_dict()}")
+            # logger.info(f"Log entry {i}: {log_entry.to_dict()}")
 
             sender, receiver, amount = None, None, None
             if log_entry.transaction:
@@ -771,7 +767,7 @@ class Server:
             # 2PC Transaction: Find the decision entry for this transaction
             if log_entry.is_2PC:
                 # If not committed, skip execution
-                logger.info(f"log_entry.committed_2PC: {log_entry.committed_2PC}")
+                # logger.info(f"log_entry.committed_2PC: {log_entry.committed_2PC}")
                 if log_entry.committed_2PC is None:
                     logger.info(f"2PC transaction (tx_id: {log_entry.tx_id}) is pending. Skipping execution.")
                     continue
@@ -927,7 +923,7 @@ class Server:
             return
 
         if success:
-            logger.info(f"Log repair: Received successful APPEND_ACK from {addr}")
+            logger.info(f"Received successful APPEND_ACK from {addr}")
             self.next_index[addr] = len(self.log)
             self.match_index[addr] = self.next_index[addr] - 1
             # Check for majority replication and update commit index if applicable
@@ -935,7 +931,7 @@ class Server:
             if match_count > len(self.cluster_to_servers[self.my_cluster]) // 2:
                 self.update_commit_index()
         else:
-            logger.info(f"Log repair: Log inconsistency detected with {addr}, initiating repair...")
+            logger.info(f"Log inconsistency detected with {addr}, initiating repair...")
             self.next_index[addr] = max(0, self.next_index[addr] - 1)
             self.send_append_entries(addr)
 

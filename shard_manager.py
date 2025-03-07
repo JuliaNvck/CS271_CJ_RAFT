@@ -49,6 +49,17 @@ class ShardManager:
         if not os.path.exists(self.log_file):
             self.append_to_log([])  # Create an empty log file
 
+    def updateLogEntryCommittedFlag(self, i, committed_flag: bool):
+        log, commit_index = self.get_log()
+
+        if 0 <= i < len(log):
+            log[i].committed_2PC = committed_flag
+            with open(self.log_file, 'w') as file:
+                json.dump({"entries": [entry.to_dict() for entry in log], "commit_index": commit_index}, file, indent=2)
+            print(f"Updated log entry {i} committed_2PC to {committed_flag}")
+        else:
+            print(f"Index {i} is out of bounds for the log with length {len(log)}")
+    
     def get_balance(self, account_id):
         if not self.is_account_in_cluster(account_id):
             raise ValueError(f"Account {account_id} does not belong to cluster {self.cluster}.")
@@ -85,13 +96,15 @@ class ShardManager:
     def execute_transaction(self, transaction, commit_index):
         x, y, amt = transaction
 
+        print(f"Executing transaction: {x} -> {y} : {amt}")
+
         if not self.is_account_in_cluster(x) and not self.is_account_in_cluster(y):
             raise ValueError(f"Neither account {x} nor account {y} belongs to cluster {self.cluster}.")
 
         if self.is_account_in_cluster(x):
             x_balance = self.get_balance(x)
             if x_balance < amt:
-                raise ValueError(f"Insufficient balance in account {x}.")
+                raise ValueError(f"Insufficient balance in account {x} balance: {x_balance}.")
             self.update_balance(x, x_balance - amt)
 
         if self.is_account_in_cluster(y):

@@ -167,6 +167,59 @@ class Client:
             print("{:<7} ${:<7}".format(server_id, balance))
         print("-" * 15)
 
+    # def PrintDatastore(self):
+    #     print("-" * 40)
+    #     for server_id in range(1, 10):
+    #         log_file = f"shards/{server_id}_log.json"
+    #         if not os.path.exists(log_file):
+    #             print(f"{server_id}: Log file not found.")
+    #             continue
+
+    #         with open(log_file, "r") as file:
+    #             log_data = json.load(file)
+
+    #         commit_index = log_data.get("commit_index", -1)
+    #         entries = log_data.get("entries", [])
+
+    #         committed_transactions = []
+    #         tx_id_to_index = {}  # track 2PC transactions by tx_id
+
+    #         for i, entry in enumerate(entries):
+    #             if i > commit_index:
+    #                 continue  # skip entries beyond the commit index
+
+    #             transaction = entry.get("transaction", {})
+    #             is_2pc = entry.get("is_2PC", False)
+    #             tx_id = entry.get("tx_id", None)
+    #             committed_2pc = entry.get("committed_2PC", False)
+
+    #             if not is_2pc:
+    #                 # non-2PC transaction: committed if index <= commit_index
+    #                 committed_transactions.append((transaction.get("sender", "null"),
+    #                                             transaction.get("receiver", "null"),
+    #                                             transaction.get("amount", "null")))
+    #             else:
+    #                 # 2PC transaction: must have a corresponding entry with committed_2PC = true
+    #                 if tx_id not in tx_id_to_index:
+    #                     tx_id_to_index[tx_id] = i  # track the first occurrence of this tx_id
+    #                 elif committed_2pc:
+    #                     # found the corresponding committed_2PC entry
+    #                     first_index = tx_id_to_index[tx_id]
+    #                     first_entry = entries[first_index]
+    #                     first_transaction = first_entry.get("transaction", {})
+    #                     committed_transactions.append((first_transaction.get("sender", "null"),
+    #                                                 first_transaction.get("receiver", "null"),
+    #                                                 first_transaction.get("amount", "null")))
+            
+    #         print(f"{server_id}: ", end='')
+    #         if committed_transactions:
+    #             for tx in committed_transactions:
+    #                 print(f"({tx[0]}, {tx[1]}, {tx[2]}) ", end='')
+    #             print()
+    #         else:
+    #             print()
+    #     print("-" * 40)
+
     def PrintDatastore(self):
         print("-" * 40)
         for server_id in range(1, 10):
@@ -182,7 +235,7 @@ class Client:
             entries = log_data.get("entries", [])
 
             committed_transactions = []
-            tx_id_to_index = {}  # track 2PC transactions by tx_id
+            tx_id_to_entry = {}  # track 2PC transactions by tx_id
 
             for i, entry in enumerate(entries):
                 if i > commit_index:
@@ -191,26 +244,24 @@ class Client:
                 transaction = entry.get("transaction", {})
                 is_2pc = entry.get("is_2PC", False)
                 tx_id = entry.get("tx_id", None)
-                committed_2pc = entry.get("committed_2PC", False)
+                committed_2pc = entry.get("committed_2PC", None)
 
                 if not is_2pc:
-                    # non-2PC transaction: committed if index <= commit_index
-                    committed_transactions.append((transaction.get("sender", "null"),
-                                                transaction.get("receiver", "null"),
-                                                transaction.get("amount", "null")))
+                    # Non-2PC transaction: committed if index <= commit_index
+                    committed_transactions.append((
+                        transaction.get("sender", "null"),
+                        transaction.get("receiver", "null"),
+                        transaction.get("amount", "null")
+                    ))
                 else:
-                    # 2PC transaction: must have a corresponding entry with committed_2PC = true
-                    if tx_id not in tx_id_to_index:
-                        tx_id_to_index[tx_id] = i  # track the first occurrence of this tx_id
-                    elif committed_2pc:
-                        # found the corresponding committed_2PC entry
-                        first_index = tx_id_to_index[tx_id]
-                        first_entry = entries[first_index]
-                        first_transaction = first_entry.get("transaction", {})
-                        committed_transactions.append((first_transaction.get("sender", "null"),
-                                                    first_transaction.get("receiver", "null"),
-                                                    first_transaction.get("amount", "null")))
-            
+                    # 2PC transaction: only show if explicitly committed
+                    if committed_2pc is True:
+                        committed_transactions.append((
+                            transaction.get("sender", "null"),
+                            transaction.get("receiver", "null"),
+                            transaction.get("amount", "null")
+                        ))
+
             print(f"{server_id}: ", end='')
             if committed_transactions:
                 for tx in committed_transactions:
@@ -219,6 +270,7 @@ class Client:
             else:
                 print()
         print("-" * 40)
+
 
 def issue_transaction(client, t, cluster_to_servers):
     if t[0] not in range(0, 3001):

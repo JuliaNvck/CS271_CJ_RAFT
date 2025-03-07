@@ -93,7 +93,7 @@ class ShardManager:
             writer = csv.writer(file)
             writer.writerows(rows)
 
-    def execute_transaction(self, transaction, commit_index):
+    def execute_transaction(self, transaction, commit_index, last_applied_index):
         x, y, amt = transaction
 
         print(f"Executing transaction: {x} -> {y} : {amt}")
@@ -112,7 +112,7 @@ class ShardManager:
             self.update_balance(y, y_balance + amt)
 
         # Update the commit index in the log file
-        self.store_commit_index(commit_index)
+        self.store_commit_apply_index(commit_index, last_applied_index)
 
     def is_account_in_cluster(self, account_id):
         if self.cluster == 1:
@@ -205,10 +205,10 @@ class ShardManager:
                 entry = log[i]
                 self.execute_transaction(entry.transaction, i)  # Pass the commit index
 
-    def store_commit_index(self, commit_index):
+    def store_commit_apply_index(self, commit_index, last_applied_index):
         log, _ = self.get_log()
         with open(self.log_file, 'w') as file:
-            json.dump({"entries": [entry.to_dict() for entry in log], "commit_index": commit_index}, file, indent=2)
+            json.dump({"entries": [entry.to_dict() for entry in log], "commit_index": commit_index, "last_applied": last_applied_index}, file, indent=2)
 
 # Example usage
 if __name__ == "__main__":

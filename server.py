@@ -85,7 +85,10 @@ class Server:
         self.last_applied = -1
         if os.path.exists(f"shards/{server_id}_log.json"):
             self.log, self.commit_index = self.shardManager.get_log()
-            self.last_applied = self.commit_index
+            with open(f"shards/{server_id}_log.json", "r") as file:
+                log_data = json.load(file)
+                self.last_applied = log_data.get("last_applied", self.commit_index)
+            # self.last_applied = self.commit_index
         # else
         #   create new log file as normal
         #   write over balance table
@@ -115,11 +118,31 @@ class Server:
         while True:
             current_time = time.time()
             for tx_id, (start_time, transaction) in list(self.pending_decisions.items()):
+                # Check if transaction has already been applied
+                already_applied = False
+                for i in range(len(self.log)):
+                    if self.log[i].tx_id == tx_id and self.log[i].committed_2PC is not None:
+                        # This transaction was already decided (committed or aborted)
+                        logger.info(f"Transaction {tx_id} already has a decision: committed_2PC={self.log[i].committed_2PC}")
+                        self.pending_decisions.pop(tx_id, None)
+                        already_applied = True
+                        break
+                        
+                if already_applied:
+                    continue
+                
                 if current_time - start_time > DECISION_TIMEOUT:
                     logger.info(f"Transaction {tx_id} timed out after {DECISION_TIMEOUT}s")
                     
                     # Mark this transaction as timed out in your transaction state
                     self.timed_out_transactions.add(tx_id)
+
+                    # Update the log entry to mark it as aborted
+                    for i in range(len(self.log)):
+                        if self.log[i].tx_id == tx_id:
+                            self.log[i].committed_2PC = False
+                            logger.info(f"Marked transaction {tx_id} as ABORTED in log entry {i}")
+                            break
                     
                     # Release the locks
                     self.release_locks_for_transaction(tx_id)
@@ -719,6 +742,9 @@ class Server:
         logger.info(f"last_applied= {self.last_applied}")
         logger.info(f"commit_index= {self.commit_index}")
         logger.info(f"Range: {range(self.last_applied + 1, self.commit_index + 1)}")
+
+        # Track the highest continuously applied index
+        continuous_applied = self.last_applied
         
         # Apply transactions from the log that have not been applied to state machine yet
         for i in range(self.last_applied + 1, self.commit_index + 1):
@@ -730,6 +756,9 @@ class Server:
             # Prevent reapplying the same log entry using log index
             if i in self.applied_log_indices:
                 logger.info(f"Log entry at index {i} already applied. Skipping to {i+1}...")
+                # Update continuous applied if this index is the next in sequence
+                if i == continuous_applied + 1:
+                    continuous_applied = i
                 continue
                 
             log_entry = self.log[i]
@@ -766,12 +795,21 @@ class Server:
                         logger.info(f"Unlocked receiver {receiver}")
 
                     self.applied_log_indices.add(i)
+                    if i == continuous_applied + 1:
+                        continuous_applied = i
                     continue
 
             # Execute the transaction
             logger.info(f"Applying transaction: {(sender, receiver, amount)}")
-            self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index)
+            self.shardManager.execute_transaction((sender, receiver, amount), self.commit_index, i)
             self.applied_log_indices.add(i)
+            if i == continuous_applied + 1:
+                continuous_applied = i
+            if log_entry.is_2PC:
+            # Remove this transaction from pending decisions if it exists
+                if log_entry.tx_id in self.pending_decisions:
+                    logger.info(f"Removing tx_id {log_entry.tx_id} from pending decisions after application")
+                    self.pending_decisions.pop(log_entry.tx_id, None)
             logger.info(f"{self.my_address} executed transaction: {sender} sent ${amount} to {receiver}")
 
             # Leader notifies client for non-2PC transactions
@@ -798,27 +836,36 @@ class Server:
                     self.locks[receiver] = False
                     logger.info(f"Unlocked receiver {receiver}")
         
-        # Update last_applied to the highest applied index
+        # # Update last_applied to the highest applied index
+        # # if self.applied_log_indices:
+        # #     self.last_applied = max(self.applied_log_indices)
+        # # Update last_applied to the highest applied index
         # if self.applied_log_indices:
-        #     self.last_applied = max(self.applied_log_indices)
-        # Update last_applied to the highest applied index
-        if self.applied_log_indices:
-            self.last_applied = max(self.applied_log_indices)
-            # Sort the indices to ensure they are in order
-            sorted_indices = sorted(self.applied_log_indices)
+        #     # self.last_applied = max(self.applied_log_indices)
+        #     last_applied = self.last_applied
+        #     # Sort the indices to ensure they are in order
+        #     sorted_indices = sorted(self.applied_log_indices)
             
-            # Initialize the last_applied to -1
-            last_applied = -1
+        #     # Initialize the last_applied to -1
+        #     # last_applied = -1
             
-            # Iterate through the sorted indices to find the maximum contiguous sequence
-            for val in sorted_indices:
-                if val == last_applied + 1:
-                    last_applied = val
-                else:
-                    break
+        #     # Iterate through the sorted indices to find the maximum contiguous sequence
+        #     for val in sorted_indices:
+        #         if val == last_applied + 1:
+        #             last_applied = val
+        #         else:
+        #             break
             
-            logger.info(f"Last applied= {last_applied}")
-            self.last_applied = last_applied
+        #     logger.info(f"Last applied= {last_applied}")
+        #     self.last_applied = last_applied
+        # self.shardManager.store_commit_apply_index(self.commit_index, self.last_applied)
+
+        # Update last_applied with the highest continuous index
+        if continuous_applied > self.last_applied:
+            logger.info(f"Updating last_applied from {self.last_applied} to {continuous_applied}")
+            self.last_applied = continuous_applied
+            self.shardManager.store_commit_apply_index(self.commit_index, self.last_applied)
+            
 
     
     def handle_decision(self, message, addr):
